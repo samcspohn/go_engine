@@ -1,0 +1,561 @@
+package main
+
+import (
+	"fmt"
+	"math"
+	"os"
+	"runtime"
+	"strings"
+	"unsafe"
+
+	"github.com/EngoEngine/glm"
+
+	"github.com/go-gl/glfw/v3.3/glfw"
+	"github.com/rajveermalviya/go-webgpu/wgpu"
+	wgpuext_glfw "github.com/rajveermalviya/go-webgpu/wgpuext/glfw"
+
+	_ "embed"
+)
+
+var forceFallbackAdapter = os.Getenv("WGPU_FORCE_FALLBACK_ADAPTER") == "1"
+
+func init() {
+	runtime.LockOSThread()
+
+	switch os.Getenv("WGPU_LOG_LEVEL") {
+	case "OFF":
+		wgpu.SetLogLevel(wgpu.LogLevel_Off)
+	case "ERROR":
+		wgpu.SetLogLevel(wgpu.LogLevel_Error)
+	case "WARN":
+		wgpu.SetLogLevel(wgpu.LogLevel_Warn)
+	case "INFO":
+		wgpu.SetLogLevel(wgpu.LogLevel_Info)
+	case "DEBUG":
+		wgpu.SetLogLevel(wgpu.LogLevel_Debug)
+	case "TRACE":
+		wgpu.SetLogLevel(wgpu.LogLevel_Trace)
+	}
+}
+
+type Vertex struct {
+	pos      [4]float32
+	texCoord [2]float32
+}
+
+var VertexBufferLayout = wgpu.VertexBufferLayout{
+	ArrayStride: uint64(unsafe.Sizeof(Vertex{})),
+	StepMode:    wgpu.VertexStepMode_Vertex,
+	Attributes: []wgpu.VertexAttribute{
+		{
+			Format:         wgpu.VertexFormat_Float32x4,
+			Offset:         0,
+			ShaderLocation: 0,
+		},
+		{
+			Format:         wgpu.VertexFormat_Float32x2,
+			Offset:         4 * 4,
+			ShaderLocation: 1,
+		},
+	},
+}
+
+func vertex(pos1, pos2, pos3, tc1, tc2 float32) Vertex {
+	return Vertex{
+		pos:      [4]float32{pos1, pos2, pos3, 1},
+		texCoord: [2]float32{tc1, tc2},
+	}
+}
+
+var vertexData = [...]Vertex{
+	// top (0, 0, 1)
+	vertex(-1, -1, 1, 0, 0),
+	vertex(1, -1, 1, 1, 0),
+	vertex(1, 1, 1, 1, 1),
+	vertex(-1, 1, 1, 0, 1),
+	// bottom (0, 0, -1)
+	vertex(-1, 1, -1, 1, 0),
+	vertex(1, 1, -1, 0, 0),
+	vertex(1, -1, -1, 0, 1),
+	vertex(-1, -1, -1, 1, 1),
+	// right (1, 0, 0)
+	vertex(1, -1, -1, 0, 0),
+	vertex(1, 1, -1, 1, 0),
+	vertex(1, 1, 1, 1, 1),
+	vertex(1, -1, 1, 0, 1),
+	// left (-1, 0, 0)
+	vertex(-1, -1, 1, 1, 0),
+	vertex(-1, 1, 1, 0, 0),
+	vertex(-1, 1, -1, 0, 1),
+	vertex(-1, -1, -1, 1, 1),
+	// front (0, 1, 0)
+	vertex(1, 1, -1, 1, 0),
+	vertex(-1, 1, -1, 0, 0),
+	vertex(-1, 1, 1, 0, 1),
+	vertex(1, 1, 1, 1, 1),
+	// back (0, -1, 0)
+	vertex(1, -1, 1, 0, 0),
+	vertex(-1, -1, 1, 1, 0),
+	vertex(-1, -1, -1, 1, 1),
+	vertex(1, -1, -1, 0, 1),
+}
+
+var indexData = [...]uint16{
+	0, 1, 2, 2, 3, 0, // top
+	4, 5, 6, 6, 7, 4, // bottom
+	8, 9, 10, 10, 11, 8, // right
+	12, 13, 14, 14, 15, 12, // left
+	16, 17, 18, 18, 19, 16, // front
+	20, 21, 22, 22, 23, 20, // back
+}
+
+const texelsSize = 256
+
+func createTexels() (texels [texelsSize * texelsSize]uint8) {
+	for id := 0; id < (texelsSize * texelsSize); id++ {
+		cx := 3.0*float32(id%texelsSize)/float32(texelsSize-1) - 2.0
+		cy := 2.0*float32(id/texelsSize)/float32(texelsSize-1) - 1.0
+		x, y, count := float32(cx), float32(cy), uint8(0)
+		for count < 0xFF && x*x+y*y < 4.0 {
+			oldX := x
+			x = x*x - y*y + cx
+			y = 2.0*oldX*y + cy
+			count += 1
+		}
+		texels[id] = count
+	}
+
+	return texels
+}
+
+func generateMatrix(camera *Camera, aspectRatio float32) glm.Mat4 {
+	projection := glm.Perspective(math.Pi/4, aspectRatio, 1, 10)
+
+	forward := camera.Rotation.Rotate(&glm.Vec3{0, 0, 1})
+	target := forward.Add(&camera.Position)
+	up := camera.Rotation.Rotate(&glm.Vec3{0, 1, 0})
+	view := glm.LookAtV(
+		&target,
+		&camera.Position,
+		&up,
+	)
+
+	return projection.Mul4(&view)
+}
+
+//go:embed shader.wgsl
+var shader string
+
+type State struct {
+	surface    *wgpu.Surface
+	swapChain  *wgpu.SwapChain
+	device     *wgpu.Device
+	queue      *wgpu.Queue
+	config     *wgpu.SwapChainDescriptor
+	vertexBuf  *wgpu.Buffer
+	indexBuf   *wgpu.Buffer
+	uniformBuf *wgpu.Buffer
+	pipeline   *wgpu.RenderPipeline
+	bindGroup  *wgpu.BindGroup
+	camera     Camera
+}
+
+func InitState(window *glfw.Window) (s *State, err error) {
+	defer func() {
+		if err != nil {
+			s.Destroy()
+			s = nil
+		}
+	}()
+	s = &State{}
+
+	s.camera.Rotation = glm.QuatLookAtV(&glm.Vec3{}, &glm.Vec3{0, 0, -1}, &glm.Vec3{0, 1, 0})
+
+	instance := wgpu.CreateInstance(nil)
+	defer instance.Release()
+
+	s.surface = instance.CreateSurface(wgpuext_glfw.GetSurfaceDescriptor(window))
+
+	adapter, err := instance.RequestAdapter(&wgpu.RequestAdapterOptions{
+		ForceFallbackAdapter: forceFallbackAdapter,
+		CompatibleSurface:    s.surface,
+	})
+	if err != nil {
+		return s, err
+	}
+	defer adapter.Release()
+
+	s.device, err = adapter.RequestDevice(nil)
+	if err != nil {
+		return s, err
+	}
+	s.queue = s.device.GetQueue()
+
+	caps := s.surface.GetCapabilities(adapter)
+
+	width, height := window.GetSize()
+	s.config = &wgpu.SwapChainDescriptor{
+		Usage:       wgpu.TextureUsage_RenderAttachment,
+		Format:      caps.Formats[0],
+		Width:       uint32(width),
+		Height:      uint32(height),
+		PresentMode: wgpu.PresentMode_Fifo,
+		AlphaMode:   caps.AlphaModes[0],
+	}
+
+	s.swapChain, err = s.device.CreateSwapChain(s.surface, s.config)
+	if err != nil {
+		return s, err
+	}
+
+	s.vertexBuf, err = s.device.CreateBufferInit(&wgpu.BufferInitDescriptor{
+		Label:    "Vertex Buffer",
+		Contents: wgpu.ToBytes(vertexData[:]),
+		Usage:    wgpu.BufferUsage_Vertex,
+	})
+	if err != nil {
+		return s, err
+	}
+
+	s.indexBuf, err = s.device.CreateBufferInit(&wgpu.BufferInitDescriptor{
+		Label:    "Index Buffer",
+		Contents: wgpu.ToBytes(indexData[:]),
+		Usage:    wgpu.BufferUsage_Index,
+	})
+	if err != nil {
+		return s, err
+	}
+
+	texels := createTexels()
+	textureExtent := wgpu.Extent3D{
+		Width:              texelsSize,
+		Height:             texelsSize,
+		DepthOrArrayLayers: 1,
+	}
+	texture, err := s.device.CreateTexture(&wgpu.TextureDescriptor{
+		Size:          textureExtent,
+		MipLevelCount: 1,
+		SampleCount:   1,
+		Dimension:     wgpu.TextureDimension_2D,
+		Format:        wgpu.TextureFormat_R8Uint,
+		Usage:         wgpu.TextureUsage_TextureBinding | wgpu.TextureUsage_CopyDst,
+	})
+	if err != nil {
+		return s, err
+	}
+	defer texture.Release()
+
+	textureView, err := texture.CreateView(nil)
+	if err != nil {
+		return s, err
+	}
+	defer textureView.Release()
+
+	s.queue.WriteTexture(
+		texture.AsImageCopy(),
+		wgpu.ToBytes(texels[:]),
+		&wgpu.TextureDataLayout{
+			Offset:       0,
+			BytesPerRow:  texelsSize,
+			RowsPerImage: wgpu.CopyStrideUndefined,
+		},
+		&textureExtent,
+	)
+
+	mxTotal := generateMatrix(&s.camera, float32(s.config.Width)/float32(s.config.Height))
+	s.uniformBuf, err = s.device.CreateBufferInit(&wgpu.BufferInitDescriptor{
+		Label:    "Uniform Buffer",
+		Contents: wgpu.ToBytes(mxTotal[:]),
+		Usage:    wgpu.BufferUsage_Uniform | wgpu.BufferUsage_CopyDst,
+	})
+	if err != nil {
+		return s, err
+	}
+
+	shader, err := s.device.CreateShaderModule(&wgpu.ShaderModuleDescriptor{
+		Label:          "shader.wgsl",
+		WGSLDescriptor: &wgpu.ShaderModuleWGSLDescriptor{Code: shader},
+	})
+	if err != nil {
+		return s, err
+	}
+	defer shader.Release()
+
+	s.pipeline, err = s.device.CreateRenderPipeline(&wgpu.RenderPipelineDescriptor{
+		Vertex: wgpu.VertexState{
+			Module:     shader,
+			EntryPoint: "vs_main",
+			Buffers:    []wgpu.VertexBufferLayout{VertexBufferLayout},
+		},
+		Fragment: &wgpu.FragmentState{
+			Module:     shader,
+			EntryPoint: "fs_main",
+			Targets: []wgpu.ColorTargetState{
+				{
+					Format:    s.config.Format,
+					Blend:     nil,
+					WriteMask: wgpu.ColorWriteMask_All,
+				},
+			},
+		},
+		Primitive: wgpu.PrimitiveState{
+			Topology:  wgpu.PrimitiveTopology_TriangleList,
+			FrontFace: wgpu.FrontFace_CCW,
+			CullMode:  wgpu.CullMode_Back,
+		},
+		DepthStencil: nil,
+		Multisample: wgpu.MultisampleState{
+			Count:                  1,
+			Mask:                   0xFFFFFFFF,
+			AlphaToCoverageEnabled: false,
+		},
+	})
+	if err != nil {
+		return s, err
+	}
+
+	bindGroupLayout := s.pipeline.GetBindGroupLayout(0)
+	defer bindGroupLayout.Release()
+
+	s.bindGroup, err = s.device.CreateBindGroup(&wgpu.BindGroupDescriptor{
+		Layout: bindGroupLayout,
+		Entries: []wgpu.BindGroupEntry{
+			{
+				Binding: 0,
+				Buffer:  s.uniformBuf,
+				Size:    wgpu.WholeSize,
+			},
+			{
+				Binding:     1,
+				TextureView: textureView,
+				Size:        wgpu.WholeSize,
+			},
+		},
+	})
+	if err != nil {
+		return s, err
+	}
+
+	return s, nil
+}
+
+func (s *State) Resize(width, height int) {
+	if width > 0 && height > 0 {
+		s.config.Width = uint32(width)
+		s.config.Height = uint32(height)
+
+		// mxTotal := generateMatrix(&s.camera, float32(width)/float32(height))
+		// s.queue.WriteBuffer(s.uniformBuf, 0, wgpu.ToBytes(mxTotal[:]))
+
+		if s.swapChain != nil {
+			s.swapChain.Release()
+		}
+		var err error
+		s.swapChain, err = s.device.CreateSwapChain(s.surface, s.config)
+		if err != nil {
+			panic(err)
+		}
+	}
+}
+
+func (s *State) Render() error {
+	nextTexture, err := s.swapChain.GetCurrentTextureView()
+	if err != nil {
+		return err
+	}
+	defer nextTexture.Release()
+
+	encoder, err := s.device.CreateCommandEncoder(nil)
+	if err != nil {
+		return err
+	}
+	defer encoder.Release()
+
+	renderPass := encoder.BeginRenderPass(&wgpu.RenderPassDescriptor{
+		ColorAttachments: []wgpu.RenderPassColorAttachment{
+			{
+				View:       nextTexture,
+				LoadOp:     wgpu.LoadOp_Clear,
+				StoreOp:    wgpu.StoreOp_Store,
+				ClearValue: wgpu.Color{R: 0.1, G: 0.2, B: 0.3, A: 1.0},
+			},
+		},
+	})
+	defer renderPass.Release()
+
+	mxTotal := generateMatrix(&s.camera, float32(s.config.Width)/float32(s.config.Height))
+	s.queue.WriteBuffer(s.uniformBuf, 0, wgpu.ToBytes(mxTotal[:]))
+
+	renderPass.SetPipeline(s.pipeline)
+	renderPass.SetBindGroup(0, s.bindGroup, nil)
+	renderPass.SetIndexBuffer(s.indexBuf, wgpu.IndexFormat_Uint16, 0, wgpu.WholeSize)
+	renderPass.SetVertexBuffer(0, s.vertexBuf, 0, wgpu.WholeSize)
+	renderPass.DrawIndexed(uint32(len(indexData)), 1, 0, 0, 0)
+	renderPass.End()
+
+	cmdBuffer, err := encoder.Finish(nil)
+	if err != nil {
+		return err
+	}
+	defer cmdBuffer.Release()
+
+	s.queue.Submit(cmdBuffer)
+	s.swapChain.Present()
+
+	return nil
+}
+
+func (s *State) Destroy() {
+	if s.bindGroup != nil {
+		s.bindGroup.Release()
+		s.bindGroup = nil
+	}
+	if s.pipeline != nil {
+		s.pipeline.Release()
+		s.pipeline = nil
+	}
+	if s.uniformBuf != nil {
+		s.uniformBuf.Release()
+		s.uniformBuf = nil
+	}
+	if s.indexBuf != nil {
+		s.indexBuf.Release()
+		s.indexBuf = nil
+	}
+	if s.vertexBuf != nil {
+		s.vertexBuf.Release()
+		s.vertexBuf = nil
+	}
+	if s.swapChain != nil {
+		s.swapChain.Release()
+		s.swapChain = nil
+	}
+	if s.config != nil {
+		s.config = nil
+	}
+	if s.queue != nil {
+		s.queue.Release()
+		s.queue = nil
+	}
+	if s.device != nil {
+		s.device.Release()
+		s.device = nil
+	}
+	if s.surface != nil {
+		s.surface.Release()
+		s.surface = nil
+	}
+}
+
+func main() {
+	if err := glfw.Init(); err != nil {
+		panic(err)
+	}
+	defer glfw.Terminate()
+
+	glfw.WindowHint(glfw.ClientAPI, glfw.NoAPI)
+	window, err := glfw.CreateWindow(640, 480, "go-webgpu with glfw", nil, nil)
+	if err != nil {
+		panic(err)
+	}
+	defer window.Destroy()
+
+	s, err := InitState(window)
+	if err != nil {
+		panic(err)
+	}
+	defer s.Destroy()
+
+	mouseX, mouseY := float32(0), float32(0)
+	window.SetInputMode(glfw.CursorMode, glfw.CursorDisabled)
+	window.SetCursorPosCallback(func(w *glfw.Window, xpos, ypos float64) {
+		mouseX += (float32(xpos) - float32(s.config.Width)/2) / 10
+		mouseY -= (float32(ypos) - float32(s.config.Height)/2) / 10
+		// mouseX -= float32(xpos)
+		// mouseY -= float32(ypos)
+		// mouseX = float32(xpos) - float32(s.config.Width)/2
+		// mouseY = float32(ypos) - float32(s.config.Height)/2
+		fmt.Println("mouseX:", mouseX, "mouseY:", mouseY)
+
+		rotx := glm.QuatRotate(mouseY/100, &glm.Vec3{1, 0, 0})
+		roty := glm.QuatRotate(-mouseX/100, &glm.Vec3{0, 1, 0})
+		s.camera.Rotation = roty.Mul(&rotx)
+		// s.camera.Rotation = rotx.Mul(&s.camera.Rotation)
+		// s.camera.Rotation = roty.Mul(&s.camera.Rotation)
+		// forward := s.camera.Rotation.Rotate(&glm.Vec3{0, 0, 1})
+		// target := s.camera.Position.Add(&forward)
+		// s.camera.Rotation = glm.AnglesToQuat(mouseY, mouseX, 0, glm.XYX)
+		// s.camera.Rotation = s.camera.Rotation.Mul(&glm.QuatRotate(mouseY, &glm.Vec3{1, 0, 0}))
+		fmt.Println("camera.Rotation:", s.camera.Rotation)
+	})
+
+	window.SetKeyCallback(func(w *glfw.Window, key glfw.Key, scancode int, action glfw.Action, mods glfw.ModifierKey) {
+		// Print resource usage on pressing 'R'
+		// if key == glfw.KeyR && (action == glfw.Press || action == glfw.Repeat) {
+		// 	report := s.instance.GenerateReport()
+		// 	buf, _ := json.MarshalIndent(report, "", "  ")
+		// 	fmt.Print(string(buf))
+		// }
+
+		move := glm.Vec3{0, 0, 0}
+		if action == glfw.Press || action == glfw.Repeat {
+			if key == glfw.KeyW {
+				move = move.Add(&glm.Vec3{0, 0, -0.1})
+			}
+			if key == glfw.KeyS {
+				move = move.Add(&glm.Vec3{0, 0, 0.1})
+			}
+			if key == glfw.KeyA {
+				move = move.Add(&glm.Vec3{-0.1, 0, 0})
+			}
+			if key == glfw.KeyD {
+				move = move.Add(&glm.Vec3{0.1, 0, 0})
+			}
+			if key == glfw.KeyQ {
+				move = move.Add(&glm.Vec3{0, -0.1, 0})
+			}
+			if key == glfw.KeyE {
+				move = move.Add(&glm.Vec3{0, 0.1, 0})
+			}
+			move = s.camera.Rotation.Rotate(&move)
+			s.camera.Position = s.camera.Position.Add(&move)
+			fmt.Println("camera.Position:", s.camera.Position)
+		}
+
+		// if key == glfw.KeyS && (action == glfw.Press || action == glfw.Repeat) {
+		// 	// s.camera.Position = glm.Vec3{0, 0, -3}
+		// 	// s.camera.Rotation = glm.Quat{W: 1}
+		// 	s.camera.Position = s.camera.Position.Add(&glm.Vec3{0, 0, -0.1})
+		// 	fmt.Println("camera.Position:", s.camera.Position)
+		// }
+		// if key == glfw.KeyW && (action == glfw.Press || action == glfw.Repeat) {
+		// 	// s.camera.Position = glm.Vec3{0, 0, -3}
+		// 	// s.camera.Rotation = glm.Quat{W: 1}
+		// 	s.camera.Position = s.camera.Position.Add(&glm.Vec3{0, 0, 0.1})
+		// 	fmt.Println("camera.Position:", s.camera.Position)
+		// }
+	})
+
+	window.SetSizeCallback(func(w *glfw.Window, width, height int) {
+		s.Resize(width, height)
+	})
+
+	for !window.ShouldClose() {
+		glfw.PollEvents()
+
+		err := s.Render()
+		window.SetCursorPos(float64(s.config.Width)/2, float64(s.config.Height)/2)
+		if err != nil {
+			fmt.Println("error occured while rendering:", err)
+
+			errstr := err.Error()
+			switch {
+			case strings.Contains(errstr, "Surface timed out"): // do nothing
+			case strings.Contains(errstr, "Surface is outdated"): // do nothing
+			case strings.Contains(errstr, "Surface was lost"): // do nothing
+			default:
+				panic(err)
+			}
+		}
+	}
+}
