@@ -6,6 +6,7 @@ import (
 	"os"
 	"runtime"
 	"strings"
+	"time"
 	"unsafe"
 
 	"github.com/EngoEngine/glm"
@@ -38,6 +39,11 @@ func init() {
 	}
 }
 
+type Transform struct {
+	// model      [16]float32
+	view       [16]float32
+	projection [16]float32
+}
 type Vertex struct {
 	pos      [4]float32
 	texCoord [2]float32
@@ -56,6 +62,33 @@ var VertexBufferLayout = wgpu.VertexBufferLayout{
 			Format:         wgpu.VertexFormat_Float32x2,
 			Offset:         4 * 4,
 			ShaderLocation: 1,
+		},
+	},
+}
+
+var InstanceBufferLayout = wgpu.VertexBufferLayout{
+	ArrayStride: uint64(unsafe.Sizeof([16]float32{})),
+	StepMode:    wgpu.VertexStepMode_Instance,
+	Attributes: []wgpu.VertexAttribute{
+		{
+			Format:         wgpu.VertexFormat_Float32x4,
+			Offset:         0,
+			ShaderLocation: 2,
+		},
+		{
+			Format:         wgpu.VertexFormat_Float32x4,
+			Offset:         4 * 4,
+			ShaderLocation: 3,
+		},
+		{
+			Format:         wgpu.VertexFormat_Float32x4,
+			Offset:         8 * 4,
+			ShaderLocation: 4,
+		},
+		{
+			Format:         wgpu.VertexFormat_Float32x4,
+			Offset:         12 * 4,
+			ShaderLocation: 5,
 		},
 	},
 }
@@ -128,8 +161,8 @@ func createTexels() (texels [texelsSize * texelsSize]uint8) {
 	return texels
 }
 
-func generateMatrix(camera *Camera, aspectRatio float32) glm.Mat4 {
-	projection := glm.Perspective(math.Pi/4, aspectRatio, 1, 10)
+func generateMatrix(camera *Camera, aspectRatio float32) Transform {
+	projection := glm.Perspective(math.Pi/4, aspectRatio, 1, 1000)
 
 	forward := camera.Rotation.Rotate(&glm.Vec3{0, 0, 1})
 	target := forward.Add(&camera.Position)
@@ -140,24 +173,25 @@ func generateMatrix(camera *Camera, aspectRatio float32) glm.Mat4 {
 		&up,
 	)
 
-	return projection.Mul4(&view)
+	return Transform{view: view, projection: projection}
 }
 
 //go:embed shader.wgsl
 var shader string
 
 type State struct {
-	surface    *wgpu.Surface
-	swapChain  *wgpu.SwapChain
-	device     *wgpu.Device
-	queue      *wgpu.Queue
-	config     *wgpu.SwapChainDescriptor
-	vertexBuf  *wgpu.Buffer
-	indexBuf   *wgpu.Buffer
-	uniformBuf *wgpu.Buffer
-	pipeline   *wgpu.RenderPipeline
-	bindGroup  *wgpu.BindGroup
-	camera     Camera
+	surface     *wgpu.Surface
+	swapChain   *wgpu.SwapChain
+	device      *wgpu.Device
+	queue       *wgpu.Queue
+	config      *wgpu.SwapChainDescriptor
+	vertexBuf   *wgpu.Buffer
+	instanceBuf *wgpu.Buffer
+	indexBuf    *wgpu.Buffer
+	uniformBuf  *wgpu.Buffer
+	pipeline    *wgpu.RenderPipeline
+	bindGroup   *wgpu.BindGroup
+	camera      Camera
 }
 
 func InitState(window *glfw.Window) (s *State, err error) {
@@ -199,7 +233,7 @@ func InitState(window *glfw.Window) (s *State, err error) {
 		Format:      caps.Formats[0],
 		Width:       uint32(width),
 		Height:      uint32(height),
-		PresentMode: wgpu.PresentMode_Fifo,
+		PresentMode: wgpu.PresentMode_Immediate,
 		AlphaMode:   caps.AlphaModes[0],
 	}
 
@@ -224,6 +258,24 @@ func InitState(window *glfw.Window) (s *State, err error) {
 	})
 	if err != nil {
 		return s, err
+	}
+
+	{
+		// model := glm.Ident4()
+		// mxTotalBytes := *(*[unsafe.Sizeof(model)]byte)(unsafe.Pointer(&model))
+		model := make([][16]float32, 1)
+		axis := glm.Vec3{1, 1, 1}
+		axis = glm.NormalizeVec3(axis)
+		model[0] = glm.HomogRotate3D(float32(glfw.GetTime()), &axis)
+		modelBytes := *(*[]byte)(unsafe.Pointer(&model))
+		s.instanceBuf, err = s.device.CreateBufferInit(&wgpu.BufferInitDescriptor{
+			Label:    "Instance Buffer",
+			Contents: modelBytes[:],
+			Usage:    wgpu.BufferUsage_Vertex | wgpu.BufferUsage_CopyDst,
+		})
+		if err != nil {
+			return s, err
+		}
 	}
 
 	texels := createTexels()
@@ -262,14 +314,18 @@ func InitState(window *glfw.Window) (s *State, err error) {
 		&textureExtent,
 	)
 
-	mxTotal := generateMatrix(&s.camera, float32(s.config.Width)/float32(s.config.Height))
-	s.uniformBuf, err = s.device.CreateBufferInit(&wgpu.BufferInitDescriptor{
-		Label:    "Uniform Buffer",
-		Contents: wgpu.ToBytes(mxTotal[:]),
-		Usage:    wgpu.BufferUsage_Uniform | wgpu.BufferUsage_CopyDst,
-	})
-	if err != nil {
-		return s, err
+	{
+
+		mxTotal := generateMatrix(&s.camera, float32(s.config.Width)/float32(s.config.Height))
+		mxTotalBytes := *(*[unsafe.Sizeof(mxTotal)]byte)(unsafe.Pointer(&mxTotal))
+		s.uniformBuf, err = s.device.CreateBufferInit(&wgpu.BufferInitDescriptor{
+			Label:    "Uniform Buffer",
+			Contents: mxTotalBytes[:],
+			Usage:    wgpu.BufferUsage_Uniform | wgpu.BufferUsage_CopyDst,
+		})
+		if err != nil {
+			return s, err
+		}
 	}
 
 	shader, err := s.device.CreateShaderModule(&wgpu.ShaderModuleDescriptor{
@@ -285,7 +341,7 @@ func InitState(window *glfw.Window) (s *State, err error) {
 		Vertex: wgpu.VertexState{
 			Module:     shader,
 			EntryPoint: "vs_main",
-			Buffers:    []wgpu.VertexBufferLayout{VertexBufferLayout},
+			Buffers:    []wgpu.VertexBufferLayout{VertexBufferLayout, InstanceBufferLayout},
 		},
 		Fragment: &wgpu.FragmentState{
 			Module:     shader,
@@ -383,13 +439,26 @@ func (s *State) Render() error {
 	})
 	defer renderPass.Release()
 
-	mxTotal := generateMatrix(&s.camera, float32(s.config.Width)/float32(s.config.Height))
-	s.queue.WriteBuffer(s.uniformBuf, 0, wgpu.ToBytes(mxTotal[:]))
+	{
+
+		mxTotal := generateMatrix(&s.camera, float32(s.config.Width)/float32(s.config.Height))
+		mxTotalBytes := *(*[unsafe.Sizeof(mxTotal)]byte)(unsafe.Pointer(&mxTotal))
+		s.queue.WriteBuffer(s.uniformBuf, 0, mxTotalBytes[:])
+	}
+	{
+		model := make([][16]float32, 1)
+		axis := glm.Vec3{1, 1, 1}
+		axis = glm.NormalizeVec3(axis)
+		model[0] = glm.HomogRotate3D(float32(glfw.GetTime()), &axis)
+		modelBytes := *(*[]byte)(unsafe.Pointer(&model))
+		s.queue.WriteBuffer(s.instanceBuf, 0, modelBytes)
+	}
 
 	renderPass.SetPipeline(s.pipeline)
 	renderPass.SetBindGroup(0, s.bindGroup, nil)
 	renderPass.SetIndexBuffer(s.indexBuf, wgpu.IndexFormat_Uint16, 0, wgpu.WholeSize)
 	renderPass.SetVertexBuffer(0, s.vertexBuf, 0, wgpu.WholeSize)
+	renderPass.SetVertexBuffer(2, s.instanceBuf, 0, wgpu.WholeSize)
 	renderPass.DrawIndexed(uint32(len(indexData)), 1, 0, 0, 0)
 	renderPass.End()
 
@@ -475,7 +544,7 @@ func main() {
 		// mouseY -= float32(ypos)
 		// mouseX = float32(xpos) - float32(s.config.Width)/2
 		// mouseY = float32(ypos) - float32(s.config.Height)/2
-		fmt.Println("mouseX:", mouseX, "mouseY:", mouseY)
+		// fmt.Println("mouseX:", mouseX, "mouseY:", mouseY)
 
 		rotx := glm.QuatRotate(mouseY/100, &glm.Vec3{1, 0, 0})
 		roty := glm.QuatRotate(-mouseX/100, &glm.Vec3{0, 1, 0})
@@ -486,7 +555,7 @@ func main() {
 		// target := s.camera.Position.Add(&forward)
 		// s.camera.Rotation = glm.AnglesToQuat(mouseY, mouseX, 0, glm.XYX)
 		// s.camera.Rotation = s.camera.Rotation.Mul(&glm.QuatRotate(mouseY, &glm.Vec3{1, 0, 0}))
-		fmt.Println("camera.Rotation:", s.camera.Rotation)
+		// fmt.Println("camera.Rotation:", s.camera.Rotation)
 	})
 
 	window.SetKeyCallback(func(w *glfw.Window, key glfw.Key, scancode int, action glfw.Action, mods glfw.ModifierKey) {
@@ -519,7 +588,7 @@ func main() {
 			}
 			move = s.camera.Rotation.Rotate(&move)
 			s.camera.Position = s.camera.Position.Add(&move)
-			fmt.Println("camera.Position:", s.camera.Position)
+			// fmt.Println("camera.Position:", s.camera.Position)
 		}
 
 		// if key == glfw.KeyS && (action == glfw.Press || action == glfw.Repeat) {
@@ -540,7 +609,11 @@ func main() {
 		s.Resize(width, height)
 	})
 
+	avg := time.Duration(0)
+	frames := 0
 	for !window.ShouldClose() {
+		frames++
+		frame := time.Now()
 		glfw.PollEvents()
 
 		err := s.Render()
@@ -556,6 +629,15 @@ func main() {
 			default:
 				panic(err)
 			}
+		}
+		avg += time.Since(frame)
+
+		if frames == 1000 {
+			avg = avg / 1000.0
+			fps := float32(time.Second / avg)
+			fmt.Println("FPS:", fps)
+			frames = 0
+			avg = 0
 		}
 	}
 }
