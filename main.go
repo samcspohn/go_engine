@@ -3,9 +3,11 @@ package main
 import (
 	"fmt"
 	"math"
+	"math/rand/v2"
 	"os"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 	"unsafe"
 
@@ -66,32 +68,32 @@ var VertexBufferLayout = wgpu.VertexBufferLayout{
 	},
 }
 
-var InstanceBufferLayout = wgpu.VertexBufferLayout{
-	ArrayStride: uint64(unsafe.Sizeof([16]float32{})),
-	StepMode:    wgpu.VertexStepMode_Instance,
-	Attributes: []wgpu.VertexAttribute{
-		{
-			Format:         wgpu.VertexFormat_Float32x4,
-			Offset:         0,
-			ShaderLocation: 2,
-		},
-		{
-			Format:         wgpu.VertexFormat_Float32x4,
-			Offset:         4 * 4,
-			ShaderLocation: 3,
-		},
-		{
-			Format:         wgpu.VertexFormat_Float32x4,
-			Offset:         8 * 4,
-			ShaderLocation: 4,
-		},
-		{
-			Format:         wgpu.VertexFormat_Float32x4,
-			Offset:         12 * 4,
-			ShaderLocation: 5,
-		},
-	},
-}
+// var InstanceBufferLayout = wgpu.VertexBufferLayout{
+// 	ArrayStride: uint64(unsafe.Sizeof([16]float32{})),
+// 	StepMode:    wgpu.VertexStepMode_Instance,
+// 	Attributes: []wgpu.VertexAttribute{
+// 		{
+// 			Format:         wgpu.VertexFormat_Float32x4,
+// 			Offset:         0,
+// 			ShaderLocation: 2,
+// 		},
+// 		{
+// 			Format:         wgpu.VertexFormat_Float32x4,
+// 			Offset:         4 * 4,
+// 			ShaderLocation: 3,
+// 		},
+// 		{
+// 			Format:         wgpu.VertexFormat_Float32x4,
+// 			Offset:         8 * 4,
+// 			ShaderLocation: 4,
+// 		},
+// 		{
+// 			Format:         wgpu.VertexFormat_Float32x4,
+// 			Offset:         12 * 4,
+// 			ShaderLocation: 5,
+// 		},
+// 	},
+// }
 
 func vertex(pos1, pos2, pos3, tc1, tc2 float32) Vertex {
 	return Vertex{
@@ -180,19 +182,70 @@ func generateMatrix(camera *Camera, aspectRatio float32) Transform {
 var shader string
 
 type State struct {
-	surface     *wgpu.Surface
-	swapChain   *wgpu.SwapChain
-	device      *wgpu.Device
-	queue       *wgpu.Queue
-	config      *wgpu.SwapChainDescriptor
-	vertexBuf   *wgpu.Buffer
-	instanceBuf *wgpu.Buffer
-	indexBuf    *wgpu.Buffer
-	uniformBuf  *wgpu.Buffer
-	pipeline    *wgpu.RenderPipeline
-	bindGroup   *wgpu.BindGroup
-	camera      Camera
+	surface      *wgpu.Surface
+	swapChain    *wgpu.SwapChain
+	depth        *wgpu.RenderPassDepthStencilAttachment
+	depthTexture *wgpu.Texture
+	depthView    *wgpu.TextureView
+	device       *wgpu.Device
+	queue        *wgpu.Queue
+	config       *wgpu.SwapChainDescriptor
+	vertexBuf    *wgpu.Buffer
+	instanceBuf  *wgpu.Buffer
+	indexBuf     *wgpu.Buffer
+	uniformBuf   *wgpu.Buffer
+	pipeline     *wgpu.RenderPipeline
+	bindGroup    *wgpu.BindGroup
+	camera       Camera
 }
+
+func createDepthAttachment(device *wgpu.Device, config *wgpu.SwapChainDescriptor) (*wgpu.Texture, error) {
+	return device.CreateTexture(&wgpu.TextureDescriptor{
+		Size: wgpu.Extent3D{
+			Width:              config.Width,
+			Height:             config.Height,
+			DepthOrArrayLayers: 1,
+		},
+		MipLevelCount: 1,
+		SampleCount:   1,
+		Dimension:     wgpu.TextureDimension_2D,
+		Format:        wgpu.TextureFormat_Depth32Float,
+		Usage:         wgpu.TextureUsage_RenderAttachment,
+	})
+}
+
+func (s *State) createRenderPassDepthAttachmentView() (*wgpu.RenderPassDepthStencilAttachment, error) {
+	if s.depthTexture != nil {
+		s.depthTexture.Release()
+	}
+	if s.depthView != nil {
+		s.depthView.Release()
+	}
+	depth, err := createDepthAttachment(s.device, s.config)
+	if err != nil {
+		return nil, err
+	}
+	s.depthTexture = depth
+	// defer depth.Release()
+	depthView, err := depth.CreateView(nil)
+	if err != nil {
+		return nil, err
+	}
+	s.depthView = depthView
+	// defer depthView.Release()
+	return &wgpu.RenderPassDepthStencilAttachment{
+		View:              depthView,
+		DepthLoadOp:       wgpu.LoadOp_Clear,
+		DepthStoreOp:      wgpu.StoreOp_Store,
+		DepthClearValue:   1.0,
+		StencilLoadOp:     wgpu.LoadOp_Clear,
+		StencilStoreOp:    wgpu.StoreOp_Store,
+		StencilClearValue: wgpu.LimitU32Undefined,
+		StencilReadOnly:   false,
+	}, nil
+}
+
+var model [][16]float32 = make([][16]float32, 1_000_000)
 
 func InitState(window *glfw.Window) (s *State, err error) {
 	defer func() {
@@ -205,6 +258,14 @@ func InitState(window *glfw.Window) (s *State, err error) {
 
 	s.camera.Rotation = glm.QuatLookAtV(&glm.Vec3{}, &glm.Vec3{0, 0, -1}, &glm.Vec3{0, 1, 0})
 
+	pos := glm.Vec3{0, 0, 0}
+	for i := range model {
+		model[i] = glm.Translate3D(pos[0], pos[1], pos[2])
+		r := glm.Vec3{rand.Float32()*2 - 1, rand.Float32()*2 - 1, rand.Float32()*2 - 1}
+		r = r.Mul(5)
+		pos = pos.Add(&r)
+	}
+
 	instance := wgpu.CreateInstance(nil)
 	defer instance.Release()
 
@@ -213,6 +274,7 @@ func InitState(window *glfw.Window) (s *State, err error) {
 	adapter, err := instance.RequestAdapter(&wgpu.RequestAdapterOptions{
 		ForceFallbackAdapter: forceFallbackAdapter,
 		CompatibleSurface:    s.surface,
+		PowerPreference:      wgpu.PowerPreference_HighPerformance,
 	})
 	if err != nil {
 		return s, err
@@ -241,7 +303,7 @@ func InitState(window *glfw.Window) (s *State, err error) {
 	if err != nil {
 		return s, err
 	}
-
+	s.depth, err = s.createRenderPassDepthAttachmentView()
 	s.vertexBuf, err = s.device.CreateBufferInit(&wgpu.BufferInitDescriptor{
 		Label:    "Vertex Buffer",
 		Contents: wgpu.ToBytes(vertexData[:]),
@@ -261,17 +323,10 @@ func InitState(window *glfw.Window) (s *State, err error) {
 	}
 
 	{
-		// model := glm.Ident4()
-		// mxTotalBytes := *(*[unsafe.Sizeof(model)]byte)(unsafe.Pointer(&model))
-		model := make([][16]float32, 1)
-		axis := glm.Vec3{1, 1, 1}
-		axis = glm.NormalizeVec3(axis)
-		model[0] = glm.HomogRotate3D(float32(glfw.GetTime()), &axis)
-		modelBytes := *(*[]byte)(unsafe.Pointer(&model))
-		s.instanceBuf, err = s.device.CreateBufferInit(&wgpu.BufferInitDescriptor{
-			Label:    "Instance Buffer",
-			Contents: modelBytes[:],
-			Usage:    wgpu.BufferUsage_Vertex | wgpu.BufferUsage_CopyDst,
+		s.instanceBuf, err = s.device.CreateBuffer(&wgpu.BufferDescriptor{
+			Size:             uint64(unsafe.Sizeof(model[0]) * uintptr(len(model))),
+			Usage:            wgpu.BufferUsage_Storage | wgpu.BufferUsage_CopyDst,
+			MappedAtCreation: false,
 		})
 		if err != nil {
 			return s, err
@@ -341,7 +396,7 @@ func InitState(window *glfw.Window) (s *State, err error) {
 		Vertex: wgpu.VertexState{
 			Module:     shader,
 			EntryPoint: "vs_main",
-			Buffers:    []wgpu.VertexBufferLayout{VertexBufferLayout, InstanceBufferLayout},
+			Buffers:    []wgpu.VertexBufferLayout{VertexBufferLayout},
 		},
 		Fragment: &wgpu.FragmentState{
 			Module:     shader,
@@ -359,7 +414,17 @@ func InitState(window *glfw.Window) (s *State, err error) {
 			FrontFace: wgpu.FrontFace_CCW,
 			CullMode:  wgpu.CullMode_Back,
 		},
-		DepthStencil: nil,
+		DepthStencil: &wgpu.DepthStencilState{
+			Format:            wgpu.TextureFormat_Depth32Float,
+			DepthWriteEnabled: true,
+			DepthCompare:      wgpu.CompareFunction_Less,
+			StencilFront: wgpu.StencilFaceState{
+				Compare: wgpu.CompareFunction_Always,
+			},
+			StencilBack: wgpu.StencilFaceState{
+				Compare: wgpu.CompareFunction_Always,
+			},
+		},
 		Multisample: wgpu.MultisampleState{
 			Count:                  1,
 			Mask:                   0xFFFFFFFF,
@@ -386,6 +451,11 @@ func InitState(window *glfw.Window) (s *State, err error) {
 				TextureView: textureView,
 				Size:        wgpu.WholeSize,
 			},
+			{
+				Binding: 2,
+				Buffer:  s.instanceBuf,
+				Size:    wgpu.WholeSize,
+			},
 		},
 	})
 	if err != nil {
@@ -411,8 +481,16 @@ func (s *State) Resize(width, height int) {
 		if err != nil {
 			panic(err)
 		}
+		s.depth, err = s.createRenderPassDepthAttachmentView()
+		if err != nil {
+			panic(err)
+		}
+
 	}
 }
+
+var numThreads = runtime.NumCPU()
+var staging *wgpu.Buffer = nil
 
 func (s *State) Render() error {
 	nextTexture, err := s.swapChain.GetCurrentTextureView()
@@ -436,6 +514,7 @@ func (s *State) Render() error {
 				ClearValue: wgpu.Color{R: 0.1, G: 0.2, B: 0.3, A: 1.0},
 			},
 		},
+		DepthStencilAttachment: s.depth,
 	})
 	defer renderPass.Release()
 
@@ -446,20 +525,65 @@ func (s *State) Render() error {
 		s.queue.WriteBuffer(s.uniformBuf, 0, mxTotalBytes[:])
 	}
 	{
-		model := make([][16]float32, 1)
-		axis := glm.Vec3{1, 1, 1}
-		axis = glm.NormalizeVec3(axis)
-		model[0] = glm.HomogRotate3D(float32(glfw.GetTime()), &axis)
-		modelBytes := *(*[]byte)(unsafe.Pointer(&model))
-		s.queue.WriteBuffer(s.instanceBuf, 0, modelBytes)
+
+		// modelBytes := unsafe.Slice((*byte)(unsafe.Pointer(&model[0])), unsafe.Sizeof(model[0])*uintptr(len(model)))
+		if staging == nil {
+			staging, err = s.device.CreateBuffer(&wgpu.BufferDescriptor{
+				Size:             uint64(unsafe.Sizeof(model[0]) * uintptr(len(model))),
+				Usage:            wgpu.BufferUsage_CopySrc | wgpu.BufferUsage_MapWrite,
+				MappedAtCreation: false,
+			})
+			if err != nil {
+				return err
+			}
+		}
+		_len := uint(unsafe.Sizeof(model[0]) * uintptr(len(model)))
+		{
+			wg := sync.WaitGroup{}
+			staging.MapAsync(wgpu.MapMode_Write, 0, uint64(_len), func(status wgpu.BufferMapAsyncStatus) {
+				if status != wgpu.BufferMapAsyncStatus_Success {
+					return
+				}
+			})
+			s.device.Poll(true, nil)
+			byteMap := staging.GetMappedRange(0, _len)
+			modelMap := unsafe.Slice((*[16]float32)(unsafe.Pointer(&byteMap[0])), len(model))
+			for a := range numThreads {
+				wg.Add(1)
+				go func() {
+					start := a * len(model) / numThreads
+					end := (a + 1) * len(model) / numThreads
+					for i := start; i < end; i++ {
+						modelMap[i] = model[i]
+					}
+					// for i := range model {
+					// 	rotation := glm.HomogRotate3D(float32(dt)*0.1, &axis)
+					// 	m := glm.Mat4(model[i])
+					// 	model[i] = m.Mul4(&rotation)
+					// }
+					wg.Done()
+				}()
+			}
+			wg.Wait()
+			err = staging.Unmap()
+			if err != nil {
+				return err
+			}
+		}
+
+		err = encoder.CopyBufferToBuffer(staging, 0, s.instanceBuf, 0, uint64(_len))
+		if err != nil {
+			return err
+		}
+		// staging.Release()
+		// s.queue.WriteBuffer(s.instanceBuf, 0, modelBytes)
 	}
 
 	renderPass.SetPipeline(s.pipeline)
 	renderPass.SetBindGroup(0, s.bindGroup, nil)
 	renderPass.SetIndexBuffer(s.indexBuf, wgpu.IndexFormat_Uint16, 0, wgpu.WholeSize)
 	renderPass.SetVertexBuffer(0, s.vertexBuf, 0, wgpu.WholeSize)
-	renderPass.SetVertexBuffer(2, s.instanceBuf, 0, wgpu.WholeSize)
-	renderPass.DrawIndexed(uint32(len(indexData)), 1, 0, 0, 0)
+	renderPass.DrawIndexed(uint32(len(indexData)), uint32(len(model)), 0, 0, 0)
 	renderPass.End()
 
 	cmdBuffer, err := encoder.Finish(nil)
@@ -514,6 +638,16 @@ func (s *State) Destroy() {
 		s.surface.Release()
 		s.surface = nil
 	}
+	if s.depthTexture != nil {
+		s.depthTexture.Release()
+	}
+	if s.depthView != nil {
+		s.depthView.Release()
+	}
+	if staging != nil {
+		staging.Release()
+	}
+
 }
 
 func main() {
@@ -558,6 +692,7 @@ func main() {
 		// fmt.Println("camera.Rotation:", s.camera.Rotation)
 	})
 
+	keys := map[glfw.Key]bool{}
 	window.SetKeyCallback(func(w *glfw.Window, key glfw.Key, scancode int, action glfw.Action, mods glfw.ModifierKey) {
 		// Print resource usage on pressing 'R'
 		// if key == glfw.KeyR && (action == glfw.Press || action == glfw.Repeat) {
@@ -566,29 +701,14 @@ func main() {
 		// 	fmt.Print(string(buf))
 		// }
 
-		move := glm.Vec3{0, 0, 0}
 		if action == glfw.Press || action == glfw.Repeat {
-			if key == glfw.KeyW {
-				move = move.Add(&glm.Vec3{0, 0, -0.1})
-			}
-			if key == glfw.KeyS {
-				move = move.Add(&glm.Vec3{0, 0, 0.1})
-			}
-			if key == glfw.KeyA {
-				move = move.Add(&glm.Vec3{-0.1, 0, 0})
-			}
-			if key == glfw.KeyD {
-				move = move.Add(&glm.Vec3{0.1, 0, 0})
-			}
-			if key == glfw.KeyQ {
-				move = move.Add(&glm.Vec3{0, -0.1, 0})
-			}
-			if key == glfw.KeyE {
-				move = move.Add(&glm.Vec3{0, 0.1, 0})
-			}
-			move = s.camera.Rotation.Rotate(&move)
-			s.camera.Position = s.camera.Position.Add(&move)
+			keys[key] = true
+
 			// fmt.Println("camera.Position:", s.camera.Position)
+		}
+
+		if action == glfw.Release {
+			delete(keys, key)
 		}
 
 		// if key == glfw.KeyS && (action == glfw.Press || action == glfw.Repeat) {
@@ -611,10 +731,81 @@ func main() {
 
 	avg := time.Duration(0)
 	frames := 0
+	dt := glfw.GetTime()
+	timer := time.NewTicker(time.Second)
+
+	go func() {
+		for {
+			<-timer.C
+			{
+				_avg := float32(avg) / float32(frames)
+				fps := float32(time.Second) / _avg
+				fmt.Println("FPS:", fps)
+				frames = 0
+				avg = 0
+			}
+		}
+	}()
+
 	for !window.ShouldClose() {
 		frames++
 		frame := time.Now()
+		dt = glfw.GetTime() - dt
 		glfw.PollEvents()
+
+		move := glm.Vec3{0, 0, 0}
+		if keys[glfw.KeyW] {
+			move = move.Add(&glm.Vec3{0, 0, -0.1})
+		}
+		if keys[glfw.KeyS] {
+			move = move.Add(&glm.Vec3{0, 0, 0.1})
+		}
+		if keys[glfw.KeyA] {
+			move = move.Add(&glm.Vec3{-0.1, 0, 0})
+		}
+		if keys[glfw.KeyD] {
+			move = move.Add(&glm.Vec3{0.1, 0, 0})
+		}
+		if keys[glfw.KeyQ] {
+			move = move.Add(&glm.Vec3{0, -0.1, 0})
+		}
+		if keys[glfw.KeyE] {
+			move = move.Add(&glm.Vec3{0, 0.1, 0})
+		}
+		move = move.Mul(float32(dt))
+		move = s.camera.Rotation.Rotate(&move)
+		s.camera.Position = s.camera.Position.Add(&move)
+
+		// model := make([][16]float32, 1)
+		axis := glm.Vec3{1, 1, 1}
+		axis = glm.NormalizeVec3(axis)
+		wg := sync.WaitGroup{}
+
+		for a := range numThreads {
+			wg.Add(1)
+			go func() {
+				start := a * len(model) / numThreads
+				end := (a + 1) * len(model) / numThreads
+				for i := start; i < end; i++ {
+					rotation := glm.HomogRotate3D(0.1, &axis)
+					m := glm.Mat4(model[i])
+					model[i] = m.Mul4(&rotation)
+				}
+				// for i := range model {
+				// 	rotation := glm.HomogRotate3D(float32(dt)*0.1, &axis)
+				// 	m := glm.Mat4(model[i])
+				// 	model[i] = m.Mul4(&rotation)
+				// }
+				wg.Done()
+			}()
+		}
+		wg.Wait()
+
+		// for i := range model {
+		// 	rotation := glm.HomogRotate3D(float32(dt)*0.1, &axis)
+		// 	m := glm.Mat4(model[i])
+		// 	model[i] = m.Mul4(&rotation)
+		// }
 
 		err := s.Render()
 		window.SetCursorPos(float64(s.config.Width)/2, float64(s.config.Height)/2)
@@ -632,12 +823,12 @@ func main() {
 		}
 		avg += time.Since(frame)
 
-		if frames == 1000 {
-			avg = avg / 1000.0
-			fps := float32(time.Second / avg)
-			fmt.Println("FPS:", fps)
-			frames = 0
-			avg = 0
-		}
+		// if frames == 1000 {
+		// 	avg = avg / 1000.0
+		// 	fps := float32(time.Second / avg)
+		// 	fmt.Println("FPS:", fps)
+		// 	frames = 0
+		// 	avg = 0
+		// }
 	}
 }
