@@ -4,9 +4,13 @@ github.com/EngoEngine/math v1.0.4 h1:ejDfSg48ynB9T6btiu9EHjZmpQgW/zHf3IeC7SqXXv8
 github.com/EngoEngine/math v1.0.4/go.mod h1:d8SnfwiaImse0lB3JuR91B2CShZmMxaTWaWZ/ZxDxAU=
 github.com/go-gl/glfw/v3.3/glfw v0.0.0-20240506104042-037f3cc74f2a h1:vxnBhFDDT+xzxf1jTJKMKZw3H0swfWk9RpWbBbDK5+0=
 github.com/go-gl/glfw/v3.3/glfw v0.0.0-20240506104042-037f3cc74f2a/go.mod h1:tQ2UAYgL5IevRw8kRxooKSPJfGvJ9fJQFa0TUsXzTg8=
+github.com/gorilla/websocket v1.5.3 h1:saDtZ6Pbx/0u+bgYQ3q96pZgCzfhKXGPqt7kZ72aNNg=
+github.com/gorilla/websocket v1.5.3/go.mod h1:YR8l580nyteQvAITg2hZ9XVh4b55+EU/adAjf1fMHhE=
 github.com/rajveermalviya/go-webgpu-examples v0.0.0-20230730112648-c29c7b8006e5 h1:Raeui147XgCGt3HLVR5x6jiIXam2rxby41pyfHpzHys=
 github.com/rajveermalviya/go-webgpu-examples v0.0.0-20230730112648-c29c7b8006e5/go.mod h1:QW8kl8TTqxYf57VVpdYmjxdeeLU6L5eiiBTVz9V6ufk=
 github.com/rajveermalviya/go-webgpu/wgpu v0.17.1 h1:BlPsyVdDfTdDh50nZypBH5Qu+on03AJgiRs0Lt7TFaI=
 github.com/rajveermalviya/go-webgpu/wgpu v0.17.1/go.mod h1:fr08XXRX3QNhQW6ylg9ihJl3NXFU0oMuqOglGpSgSJo=
 github.com/rajveermalviya/go-webgpu/wgpuext/glfw v0.1.1 h1:4K8d7OqHe7SLqyVDJBVb7ig6IvmnLA8pyb+DFMLKL6E=
 github.com/rajveermalviya/go-webgpu/wgpuext/glfw v0.1.1/go.mod h1:ot0RxM94jKRVgXnL7K42Wqmj2qgnnuh2461cP+L0LDM=
+golang.org/x/net v0.29.0 h1:5ORfpBpCs4HzDYoodCDBbwHzdR5UrLBZ3sOnUJmFoHo=
+golang.org/x/net v0.29.0/go.mod h1:gLkgy8jTGERgjzMic6DS9+SP0ajcu6Xu3Orq/SpETg0=

@@ -164,7 +164,7 @@ func createTexels() (texels [texelsSize * texelsSize]uint8) {
 }
 
 func generateMatrix(camera *Camera, aspectRatio float32) Transform {
-	projection := glm.Perspective(math.Pi/4, aspectRatio, 1, 1000)
+	projection := glm.Perspective(math.Pi/4, aspectRatio, 1, 1_000)
 
 	forward := camera.Rotation.Rotate(&glm.Vec3{0, 0, 1})
 	target := forward.Add(&camera.Position)
@@ -260,7 +260,13 @@ func InitState(window *glfw.Window) (s *State, err error) {
 
 	pos := glm.Vec3{0, 0, 0}
 	for i := range model {
-		model[i] = glm.Translate3D(pos[0], pos[1], pos[2])
+		axis := glm.Vec3{rand.Float32()*2 - 1, rand.Float32()*2 - 1, rand.Float32()*2 - 1}
+		axis = axis.Normalized()
+		rot := glm.HomogRotate3D(rand.Float32()*2*math.Pi, &axis)
+		m := glm.Mat4(model[i])
+		m = glm.Translate3D(pos[0], pos[1], pos[2])
+		m = m.Mul4(&rot)
+		model[i] = m
 		r := glm.Vec3{rand.Float32()*2 - 1, rand.Float32()*2 - 1, rand.Float32()*2 - 1}
 		r = r.Mul(5)
 		pos = pos.Add(&r)
@@ -731,7 +737,7 @@ func main() {
 
 	avg := time.Duration(0)
 	frames := 0
-	dt := glfw.GetTime()
+	// dt := glfw.GetTime()
 	timer := time.NewTicker(time.Second)
 
 	go func() {
@@ -747,10 +753,16 @@ func main() {
 		}
 	}()
 
+	Client()
+	last_time := time.Now()
 	for !window.ShouldClose() {
 		frames++
+		dt := time.Since(last_time).Seconds()
+		last_time = time.Now()
 		frame := time.Now()
-		dt = glfw.GetTime() - dt
+		// dt = glfw.GetTime() - dt
+
+		// println("dt:", dt)
 		glfw.PollEvents()
 
 		move := glm.Vec3{0, 0, 0}
@@ -772,12 +784,12 @@ func main() {
 		if keys[glfw.KeyE] {
 			move = move.Add(&glm.Vec3{0, 0.1, 0})
 		}
-		move = move.Mul(float32(dt))
+		move = move.Mul(float32(dt) * 500.0)
 		move = s.camera.Rotation.Rotate(&move)
 		s.camera.Position = s.camera.Position.Add(&move)
 
 		// model := make([][16]float32, 1)
-		axis := glm.Vec3{1, 1, 1}
+		axis := glm.Vec3{0, 1, 0}
 		axis = glm.NormalizeVec3(axis)
 		wg := sync.WaitGroup{}
 
@@ -787,9 +799,11 @@ func main() {
 				start := a * len(model) / numThreads
 				end := (a + 1) * len(model) / numThreads
 				for i := start; i < end; i++ {
-					rotation := glm.HomogRotate3D(0.1, &axis)
+					rotation := glm.HomogRotate3D(float32(dt), &axis)
+					translation := glm.Translate3D(0, 0, float32(dt)*5.0)
 					m := glm.Mat4(model[i])
-					model[i] = m.Mul4(&rotation)
+					m = m.Mul4(&rotation)
+					model[i] = m.Mul4(&translation)
 				}
 				// for i := range model {
 				// 	rotation := glm.HomogRotate3D(float32(dt)*0.1, &axis)
