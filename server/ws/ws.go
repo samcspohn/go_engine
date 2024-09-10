@@ -1,7 +1,10 @@
 package ws
 
 import (
+	"fmt"
 	"net/http"
+	"sync"
+	"time"
 
 	"github.com/gorilla/websocket"
 )
@@ -13,14 +16,18 @@ var upgrader = websocket.Upgrader{
 }
 
 type Server struct {
-	clients       map[*websocket.Conn]bool
-	handleMessage func(message []byte) // New message handler
+	clients       map[int]*websocket.Conn
+	handleMessage func(server *Server, id int, message []byte) // New message handler
+	idGen         int
+	lock          sync.Mutex
 }
 
-func StartServer(handleMessage func(message []byte)) *Server {
+func StartServer(handleMessage func(server *Server, id int, message []byte)) *Server {
 	server := Server{
-		make(map[*websocket.Conn]bool),
+		make(map[int]*websocket.Conn),
 		handleMessage,
+		0,
+		sync.Mutex{},
 	}
 
 	http.HandleFunc("/", server.echo)
@@ -28,11 +35,19 @@ func StartServer(handleMessage func(message []byte)) *Server {
 
 	return &server
 }
+func (server *Server) Poll() {
+	for {
+		time.Sleep(1 * time.Second)
+	}
+}
 
 func (server *Server) echo(w http.ResponseWriter, r *http.Request) {
 	connection, _ := upgrader.Upgrade(w, r, nil)
-
-	server.clients[connection] = true // Save the connection using it as a key
+	id := server.idGen
+	server.idGen++
+	server.clients[id] = connection // Save the connection using it as a key
+	connection.WriteMessage(websocket.TextMessage, []byte(fmt.Sprintf("%d", id)))
+	// server.WriteMessage([]byte(fmt.Sprintf("create: %d", id)))
 
 	for {
 		mt, message, err := connection.ReadMessage()
@@ -41,16 +56,25 @@ func (server *Server) echo(w http.ResponseWriter, r *http.Request) {
 			break // Exit the loop if the client tries to close the connection or the connection is interrupted
 		}
 
-		go server.handleMessage(message)
+		go server.handleMessage(server, id, message)
 	}
 
-	delete(server.clients, connection) // Removing the connection
+	delete(server.clients, id) // Removing the connection
 
 	connection.Close()
+	// server.WriteMessage([]byte(fmt.Sprintf("destroy: %d", id)))
 }
 
-func (server *Server) WriteMessage(message []byte) {
-	for conn := range server.clients {
-		conn.WriteMessage(websocket.TextMessage, message)
+func (server *Server) WriteMessage(client int, message []byte) {
+	server.lock.Lock()
+
+	newMessage := append([]byte(fmt.Sprintf("%d, ", client)), message...)
+	for _, conn := range server.clients {
+		println(string(newMessage))
+		err := conn.WriteMessage(websocket.TextMessage, newMessage)
+		if err != nil {
+			println("Error writing message")
+		}
 	}
+	server.lock.Unlock()
 }

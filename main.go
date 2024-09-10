@@ -3,7 +3,6 @@ package main
 import (
 	"fmt"
 	"math"
-	"math/rand/v2"
 	"os"
 	"runtime"
 	"strings"
@@ -247,6 +246,15 @@ func (s *State) createRenderPassDepthAttachmentView() (*wgpu.RenderPassDepthSten
 
 var model [][16]float32 = make([][16]float32, 1_000_000)
 
+type Player struct {
+	Position glm.Vec3
+	Rotation glm.Quat
+}
+
+var players = make(map[int]Player)
+var mu = sync.Mutex{}
+var numPlayers = 0
+
 func InitState(window *glfw.Window) (s *State, err error) {
 	defer func() {
 		if err != nil {
@@ -258,19 +266,19 @@ func InitState(window *glfw.Window) (s *State, err error) {
 
 	s.camera.Rotation = glm.QuatLookAtV(&glm.Vec3{}, &glm.Vec3{0, 0, -1}, &glm.Vec3{0, 1, 0})
 
-	pos := glm.Vec3{0, 0, 0}
-	for i := range model {
-		axis := glm.Vec3{rand.Float32()*2 - 1, rand.Float32()*2 - 1, rand.Float32()*2 - 1}
-		axis = axis.Normalized()
-		rot := glm.HomogRotate3D(rand.Float32()*2*math.Pi, &axis)
-		m := glm.Mat4(model[i])
-		m = glm.Translate3D(pos[0], pos[1], pos[2])
-		m = m.Mul4(&rot)
-		model[i] = m
-		r := glm.Vec3{rand.Float32()*2 - 1, rand.Float32()*2 - 1, rand.Float32()*2 - 1}
-		r = r.Mul(5)
-		pos = pos.Add(&r)
-	}
+	// pos := glm.Vec3{0, 0, 0}
+	// for i := range model {
+	// 	axis := glm.Vec3{rand.Float32()*2 - 1, rand.Float32()*2 - 1, rand.Float32()*2 - 1}
+	// 	axis = axis.Normalized()
+	// 	rot := glm.HomogRotate3D(rand.Float32()*2*math.Pi, &axis)
+	// 	m := glm.Mat4(model[i])
+	// 	m = glm.Translate3D(pos[0], pos[1], pos[2])
+	// 	m = m.Mul4(&rot)
+	// 	model[i] = m
+	// 	r := glm.Vec3{rand.Float32()*2 - 1, rand.Float32()*2 - 1, rand.Float32()*2 - 1}
+	// 	r = r.Mul(5)
+	// 	pos = pos.Add(&r)
+	// }
 
 	instance := wgpu.CreateInstance(nil)
 	defer instance.Release()
@@ -545,7 +553,10 @@ func (s *State) Render() error {
 		}
 		_len := uint(unsafe.Sizeof(model[0]) * uintptr(len(model)))
 		{
-			wg := sync.WaitGroup{}
+			mu.Lock()
+			numPlayers = len(players)
+			println("Num Players:", numPlayers)
+			// wg := sync.WaitGroup{}
 			staging.MapAsync(wgpu.MapMode_Write, 0, uint64(_len), func(status wgpu.BufferMapAsyncStatus) {
 				if status != wgpu.BufferMapAsyncStatus_Success {
 					return
@@ -554,23 +565,34 @@ func (s *State) Render() error {
 			s.device.Poll(true, nil)
 			byteMap := staging.GetMappedRange(0, _len)
 			modelMap := unsafe.Slice((*[16]float32)(unsafe.Pointer(&byteMap[0])), len(model))
-			for a := range numThreads {
-				wg.Add(1)
-				go func() {
-					start := a * len(model) / numThreads
-					end := (a + 1) * len(model) / numThreads
-					for i := start; i < end; i++ {
-						modelMap[i] = model[i]
-					}
-					// for i := range model {
-					// 	rotation := glm.HomogRotate3D(float32(dt)*0.1, &axis)
-					// 	m := glm.Mat4(model[i])
-					// 	model[i] = m.Mul4(&rotation)
-					// }
-					wg.Done()
-				}()
+			i := 0
+			for _, player := range players {
+				rotation := player.Rotation.Mat4()
+				translation := glm.Translate3D(player.Position[0], player.Position[1], player.Position[2])
+				m := glm.Ident4()
+				m = m.Mul4(&translation)
+				m = m.Mul4(&rotation)
+				modelMap[i] = *(*[16]float32)(unsafe.Pointer(&m))
+				i++
 			}
-			wg.Wait()
+			mu.Unlock()
+			// for a := range numThreads {
+			// 	wg.Add(1)
+			// 	go func() {
+			// 		start := a * len(model) / numThreads
+			// 		end := (a + 1) * len(model) / numThreads
+			// 		for i := start; i < end; i++ {
+			// 			modelMap[i] = model[i]
+			// 		}
+			// 		// for i := range model {
+			// 		// 	rotation := glm.HomogRotate3D(float32(dt)*0.1, &axis)
+			// 		// 	m := glm.Mat4(model[i])
+			// 		// 	model[i] = m.Mul4(&rotation)
+			// 		// }
+			// 		wg.Done()
+			// 	}()
+			// }
+			// wg.Wait()
 			err = staging.Unmap()
 			if err != nil {
 				return err
@@ -589,7 +611,7 @@ func (s *State) Render() error {
 	renderPass.SetBindGroup(0, s.bindGroup, nil)
 	renderPass.SetIndexBuffer(s.indexBuf, wgpu.IndexFormat_Uint16, 0, wgpu.WholeSize)
 	renderPass.SetVertexBuffer(0, s.vertexBuf, 0, wgpu.WholeSize)
-	renderPass.DrawIndexed(uint32(len(indexData)), uint32(len(model)), 0, 0, 0)
+	renderPass.DrawIndexed(uint32(len(indexData)), uint32(numPlayers), 0, 0, 0)
 	renderPass.End()
 
 	cmdBuffer, err := encoder.Finish(nil)
@@ -680,55 +702,20 @@ func main() {
 	window.SetCursorPosCallback(func(w *glfw.Window, xpos, ypos float64) {
 		mouseX += (float32(xpos) - float32(s.config.Width)/2) / 10
 		mouseY -= (float32(ypos) - float32(s.config.Height)/2) / 10
-		// mouseX -= float32(xpos)
-		// mouseY -= float32(ypos)
-		// mouseX = float32(xpos) - float32(s.config.Width)/2
-		// mouseY = float32(ypos) - float32(s.config.Height)/2
-		// fmt.Println("mouseX:", mouseX, "mouseY:", mouseY)
-
 		rotx := glm.QuatRotate(mouseY/100, &glm.Vec3{1, 0, 0})
 		roty := glm.QuatRotate(-mouseX/100, &glm.Vec3{0, 1, 0})
 		s.camera.Rotation = roty.Mul(&rotx)
-		// s.camera.Rotation = rotx.Mul(&s.camera.Rotation)
-		// s.camera.Rotation = roty.Mul(&s.camera.Rotation)
-		// forward := s.camera.Rotation.Rotate(&glm.Vec3{0, 0, 1})
-		// target := s.camera.Position.Add(&forward)
-		// s.camera.Rotation = glm.AnglesToQuat(mouseY, mouseX, 0, glm.XYX)
-		// s.camera.Rotation = s.camera.Rotation.Mul(&glm.QuatRotate(mouseY, &glm.Vec3{1, 0, 0}))
-		// fmt.Println("camera.Rotation:", s.camera.Rotation)
 	})
 
 	keys := map[glfw.Key]bool{}
 	window.SetKeyCallback(func(w *glfw.Window, key glfw.Key, scancode int, action glfw.Action, mods glfw.ModifierKey) {
-		// Print resource usage on pressing 'R'
-		// if key == glfw.KeyR && (action == glfw.Press || action == glfw.Repeat) {
-		// 	report := s.instance.GenerateReport()
-		// 	buf, _ := json.MarshalIndent(report, "", "  ")
-		// 	fmt.Print(string(buf))
-		// }
-
 		if action == glfw.Press || action == glfw.Repeat {
 			keys[key] = true
-
-			// fmt.Println("camera.Position:", s.camera.Position)
 		}
 
 		if action == glfw.Release {
 			delete(keys, key)
 		}
-
-		// if key == glfw.KeyS && (action == glfw.Press || action == glfw.Repeat) {
-		// 	// s.camera.Position = glm.Vec3{0, 0, -3}
-		// 	// s.camera.Rotation = glm.Quat{W: 1}
-		// 	s.camera.Position = s.camera.Position.Add(&glm.Vec3{0, 0, -0.1})
-		// 	fmt.Println("camera.Position:", s.camera.Position)
-		// }
-		// if key == glfw.KeyW && (action == glfw.Press || action == glfw.Repeat) {
-		// 	// s.camera.Position = glm.Vec3{0, 0, -3}
-		// 	// s.camera.Rotation = glm.Quat{W: 1}
-		// 	s.camera.Position = s.camera.Position.Add(&glm.Vec3{0, 0, 0.1})
-		// 	fmt.Println("camera.Position:", s.camera.Position)
-		// }
 	})
 
 	window.SetSizeCallback(func(w *glfw.Window, width, height int) {
@@ -753,7 +740,27 @@ func main() {
 		}
 	}()
 
-	Client()
+	// Client()
+	client := Client{}
+	client.init()
+	go client.Recv(func(s string) {
+		// println("Received:", s)
+		id := 0
+		position := glm.Vec3{}
+		rotation := glm.Quat{}
+		// println(s)
+		_, err := fmt.Sscanf(s, "%d, [%v %v %v], {%v [%v %v %v]}", &id, &position[0], &position[1], &position[2], &rotation.W, &rotation.V[0], &rotation.V[1], &rotation.V[2])
+		// println("scanned")
+		// _, err := fmt.Sscanf(s, "%d, %d, %v", &id, &position, &rotation)
+		if err != nil {
+			fmt.Println("Error:", err)
+		}
+		mu.Lock()
+		players[id] = Player{Position: position, Rotation: rotation}
+		fmt.Printf("Received: %d, Position: %v, Rotation: %v\n", id, players[id].Position, players[id].Rotation)
+		mu.Unlock()
+	})
+
 	last_time := time.Now()
 	for !window.ShouldClose() {
 		frames++
@@ -788,6 +795,12 @@ func main() {
 		move = s.camera.Rotation.Rotate(&move)
 		s.camera.Position = s.camera.Position.Add(&move)
 
+		client.Send(fmt.Sprintf("%v, %v", s.camera.Position, s.camera.Rotation))
+
+		// if keys[glfw.KeyT] {
+		// 	client.Send("Hello")
+		// }
+
 		// model := make([][16]float32, 1)
 		axis := glm.Vec3{0, 1, 0}
 		axis = glm.NormalizeVec3(axis)
@@ -805,11 +818,6 @@ func main() {
 					m = m.Mul4(&rotation)
 					model[i] = m.Mul4(&translation)
 				}
-				// for i := range model {
-				// 	rotation := glm.HomogRotate3D(float32(dt)*0.1, &axis)
-				// 	m := glm.Mat4(model[i])
-				// 	model[i] = m.Mul4(&rotation)
-				// }
 				wg.Done()
 			}()
 		}
@@ -820,7 +828,6 @@ func main() {
 		// 	m := glm.Mat4(model[i])
 		// 	model[i] = m.Mul4(&rotation)
 		// }
-
 		err := s.Render()
 		window.SetCursorPos(float64(s.config.Width)/2, float64(s.config.Height)/2)
 		if err != nil {
