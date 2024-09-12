@@ -20,22 +20,24 @@ type Client struct {
 	id   int
 }
 
-func (c *Client) Send(msg string) {
-	err := c.conn.WriteMessage(websocket.TextMessage, []byte(msg))
+func (c *Client) Send(msg []byte) {
+	err := c.conn.WriteMessage(websocket.TextMessage, msg)
 	if err != nil {
 		log.Println("write:", err)
 		return
 	}
 }
-func (c *Client) Recv(f func(string)) {
+
+func (c *Client) Recv(f func([]byte)) {
 	for {
 		_, message, err := c.conn.ReadMessage()
 		if err != nil {
 			log.Println("read:", err)
 			return
 		}
+		f(message)
 		// log.Printf("recv: %s", message)
-		f(string(message))
+		// f(string(message))
 	}
 }
 func (c *Client) init() {

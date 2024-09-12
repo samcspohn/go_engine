@@ -555,7 +555,7 @@ func (s *State) Render() error {
 		{
 			mu.Lock()
 			numPlayers = len(players)
-			println("Num Players:", numPlayers)
+			// println("Num Players:", numPlayers)
 			// wg := sync.WaitGroup{}
 			staging.MapAsync(wgpu.MapMode_Write, 0, uint64(_len), func(status wgpu.BufferMapAsyncStatus) {
 				if status != wgpu.BufferMapAsyncStatus_Success {
@@ -678,6 +678,11 @@ func (s *State) Destroy() {
 
 }
 
+type Message struct {
+	Client int
+	Data   Player
+}
+
 func main() {
 	if err := glfw.Init(); err != nil {
 		panic(err)
@@ -743,22 +748,47 @@ func main() {
 	// Client()
 	client := Client{}
 	client.init()
-	go client.Recv(func(s string) {
-		// println("Received:", s)
-		id := 0
-		position := glm.Vec3{}
-		rotation := glm.Quat{}
-		// println(s)
-		_, err := fmt.Sscanf(s, "%d, [%v %v %v], {%v [%v %v %v]}", &id, &position[0], &position[1], &position[2], &rotation.W, &rotation.V[0], &rotation.V[1], &rotation.V[2])
-		// println("scanned")
-		// _, err := fmt.Sscanf(s, "%d, %d, %v", &id, &position, &rotation)
-		if err != nil {
-			fmt.Println("Error:", err)
+	go client.Recv(func(s []byte) {
+
+		mNumPlayers := int(s[0])
+		if mNumPlayers == 0 {
+			return
 		}
+		// mplayers := make([]*Message, mNumPlayers)
+		println("Num Players:", mNumPlayers)
+		// s = s[1:]
+		messages := unsafe.Slice((*Message)(unsafe.Pointer(&s[1])), mNumPlayers)
+		// for i := 0; i < mNumPlayers; i++ {
+		// 	message := &messages[i]
+		// 	mplayers[i] = message
+		// }
+		// message := (*Message)(unsafe.Pointer(&s[0]))
+		// id := message.Client
 		mu.Lock()
-		players[id] = Player{Position: position, Rotation: rotation}
-		fmt.Printf("Received: %d, Position: %v, Rotation: %v\n", id, players[id].Position, players[id].Rotation)
+		for _, message := range messages {
+			id := message.Client
+			players[id] = message.Data
+			fmt.Printf("Received: %d, Position: %v, Rotation: %v\n", id, players[id].Position, players[id].Rotation)
+
+		}
+		// players[id] = message.Data
+		// fmt.Printf("Received: %d, Position: %v, Rotation: %v\n", id, players[id].Position, players[id].Rotation)
 		mu.Unlock()
+		// // println("Received:", s)
+		// id := 0
+		// position := glm.Vec3{}
+		// rotation := glm.Quat{}
+		// // println(s)
+		// _, err := fmt.Sscanf(s, "%d, [%v %v %v], {%v [%v %v %v]}", &id, &position[0], &position[1], &position[2], &rotation.W, &rotation.V[0], &rotation.V[1], &rotation.V[2])
+		// // println("scanned")
+		// // _, err := fmt.Sscanf(s, "%d, %d, %v", &id, &position, &rotation)
+		// if err != nil {
+		// 	fmt.Println("Error:", err)
+		// }
+		// mu.Lock()
+		// players[id] = Player{Position: position, Rotation: rotation}
+		// fmt.Printf("Received: %d, Position: %v, Rotation: %v\n", id, players[id].Position, players[id].Rotation)
+		// mu.Unlock()
 	})
 
 	last_time := time.Now()
@@ -794,8 +824,11 @@ func main() {
 		move = move.Mul(float32(dt) * 500.0)
 		move = s.camera.Rotation.Rotate(&move)
 		s.camera.Position = s.camera.Position.Add(&move)
-
-		client.Send(fmt.Sprintf("%v, %v", s.camera.Position, s.camera.Rotation))
+		player := Player{Position: s.camera.Position, Rotation: s.camera.Rotation}
+		message := (*[unsafe.Sizeof(player)]byte)(unsafe.Pointer(&player))
+		newMessage := append([]byte{0}, message[:]...)
+		client.Send(newMessage)
+		// client.Send(fmt.Sprintf("%v, %v", s.camera.Position, s.camera.Rotation))
 
 		// if keys[glfw.KeyT] {
 		// 	client.Send("Hello")
