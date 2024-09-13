@@ -1,7 +1,6 @@
 package main
 
 import (
-	"fmt"
 	"time"
 	"unsafe"
 	"wgpu_server/ws"
@@ -26,11 +25,12 @@ func main() {
 			i++
 		}
 		server.Lock.Unlock()
-		for i := range mPlayers {
-			player := mPlayers[i]
-			fmt.Printf("Player %d: %v, %v\n", player.Client, player.Data.Position, player.Data.Rotation)
-		}
-		println()
+		// for i := range mPlayers {
+		// 	player := mPlayers[i]
+		// 	fmt.Printf("Player %d: %v, %v\n", player.Client, player.Data.Position, player.Data.Rotation)
+		// }
+		// println()
+
 		// println(mPlayers)
 		// println(unsafe.Sizeof(Players))
 		// PlayersBytes := (*[unsafe.Sizeof(mPlayers)]byte)(unsafe.Pointer(&mPlayers[0]))[:]

@@ -101,7 +101,7 @@ func vertex(pos1, pos2, pos3, tc1, tc2 float32) Vertex {
 	}
 }
 
-var vertexData = [...]Vertex{
+var cubeVertexData = [...]Vertex{
 	// top (0, 0, 1)
 	vertex(-1, -1, 1, 0, 0),
 	vertex(1, -1, 1, 1, 0),
@@ -134,13 +134,24 @@ var vertexData = [...]Vertex{
 	vertex(1, -1, -1, 0, 1),
 }
 
-var indexData = [...]uint16{
+var cubeIndexData = [...]uint16{
 	0, 1, 2, 2, 3, 0, // top
 	4, 5, 6, 6, 7, 4, // bottom
 	8, 9, 10, 10, 11, 8, // right
 	12, 13, 14, 14, 15, 12, // left
 	16, 17, 18, 18, 19, 16, // front
 	20, 21, 22, 22, 23, 20, // back
+}
+var planeVertexData = [...]Vertex{
+	// top (0, 0, 1)
+	vertex(-1, -1, 1, 0, 0),
+	vertex(1, -1, 1, 1, 0),
+	vertex(1, 1, 1, 1, 1),
+	vertex(-1, 1, 1, 0, 1),
+}
+
+var planeIndexData = [...]uint16{
+	0, 1, 2, 2, 3, 0, // top
 }
 
 const texelsSize = 256
@@ -163,7 +174,7 @@ func createTexels() (texels [texelsSize * texelsSize]uint8) {
 }
 
 func generateMatrix(camera *Camera, aspectRatio float32) Transform {
-	projection := glm.Perspective(math.Pi/4, aspectRatio, 1, 1_000)
+	projection := glm.Perspective(math.Pi/4, aspectRatio, 0.1, 1_000)
 
 	forward := camera.Rotation.Rotate(&glm.Vec3{0, 0, 1})
 	target := forward.Add(&camera.Position)
@@ -189,13 +200,11 @@ type State struct {
 	device       *wgpu.Device
 	queue        *wgpu.Queue
 	config       *wgpu.SwapChainDescriptor
-	vertexBuf    *wgpu.Buffer
-	instanceBuf  *wgpu.Buffer
-	indexBuf     *wgpu.Buffer
+	renderers    map[int]*Renderer
 	uniformBuf   *wgpu.Buffer
 	pipeline     *wgpu.RenderPipeline
-	bindGroup    *wgpu.BindGroup
 	camera       Camera
+	textureView  *wgpu.TextureView
 }
 
 func createDepthAttachment(device *wgpu.Device, config *wgpu.SwapChainDescriptor) (*wgpu.Texture, error) {
@@ -253,7 +262,6 @@ type Player struct {
 
 var players = make(map[int]Player)
 var mu = sync.Mutex{}
-var numPlayers = 0
 
 func InitState(window *glfw.Window) (s *State, err error) {
 	defer func() {
@@ -318,35 +326,7 @@ func InitState(window *glfw.Window) (s *State, err error) {
 		return s, err
 	}
 	s.depth, err = s.createRenderPassDepthAttachmentView()
-	s.vertexBuf, err = s.device.CreateBufferInit(&wgpu.BufferInitDescriptor{
-		Label:    "Vertex Buffer",
-		Contents: wgpu.ToBytes(vertexData[:]),
-		Usage:    wgpu.BufferUsage_Vertex,
-	})
-	if err != nil {
-		return s, err
-	}
-
-	s.indexBuf, err = s.device.CreateBufferInit(&wgpu.BufferInitDescriptor{
-		Label:    "Index Buffer",
-		Contents: wgpu.ToBytes(indexData[:]),
-		Usage:    wgpu.BufferUsage_Index,
-	})
-	if err != nil {
-		return s, err
-	}
-
-	{
-		s.instanceBuf, err = s.device.CreateBuffer(&wgpu.BufferDescriptor{
-			Size:             uint64(unsafe.Sizeof(model[0]) * uintptr(len(model))),
-			Usage:            wgpu.BufferUsage_Storage | wgpu.BufferUsage_CopyDst,
-			MappedAtCreation: false,
-		})
-		if err != nil {
-			return s, err
-		}
-	}
-
+	s.renderers = make(map[int]*Renderer)
 	texels := createTexels()
 	textureExtent := wgpu.Extent3D{
 		Width:              texelsSize,
@@ -366,11 +346,11 @@ func InitState(window *glfw.Window) (s *State, err error) {
 	}
 	defer texture.Release()
 
-	textureView, err := texture.CreateView(nil)
+	s.textureView, err = texture.CreateView(nil)
 	if err != nil {
 		return s, err
 	}
-	defer textureView.Release()
+	// defer textureView.Release()
 
 	s.queue.WriteTexture(
 		texture.AsImageCopy(),
@@ -384,7 +364,6 @@ func InitState(window *glfw.Window) (s *State, err error) {
 	)
 
 	{
-
 		mxTotal := generateMatrix(&s.camera, float32(s.config.Width)/float32(s.config.Height))
 		mxTotalBytes := *(*[unsafe.Sizeof(mxTotal)]byte)(unsafe.Pointer(&mxTotal))
 		s.uniformBuf, err = s.device.CreateBufferInit(&wgpu.BufferInitDescriptor{
@@ -443,33 +422,6 @@ func InitState(window *glfw.Window) (s *State, err error) {
 			Count:                  1,
 			Mask:                   0xFFFFFFFF,
 			AlphaToCoverageEnabled: false,
-		},
-	})
-	if err != nil {
-		return s, err
-	}
-
-	bindGroupLayout := s.pipeline.GetBindGroupLayout(0)
-	defer bindGroupLayout.Release()
-
-	s.bindGroup, err = s.device.CreateBindGroup(&wgpu.BindGroupDescriptor{
-		Layout: bindGroupLayout,
-		Entries: []wgpu.BindGroupEntry{
-			{
-				Binding: 0,
-				Buffer:  s.uniformBuf,
-				Size:    wgpu.WholeSize,
-			},
-			{
-				Binding:     1,
-				TextureView: textureView,
-				Size:        wgpu.WholeSize,
-			},
-			{
-				Binding: 2,
-				Buffer:  s.instanceBuf,
-				Size:    wgpu.WholeSize,
-			},
 		},
 	})
 	if err != nil {
@@ -538,80 +490,9 @@ func (s *State) Render() error {
 		mxTotalBytes := *(*[unsafe.Sizeof(mxTotal)]byte)(unsafe.Pointer(&mxTotal))
 		s.queue.WriteBuffer(s.uniformBuf, 0, mxTotalBytes[:])
 	}
-	{
-
-		// modelBytes := unsafe.Slice((*byte)(unsafe.Pointer(&model[0])), unsafe.Sizeof(model[0])*uintptr(len(model)))
-		if staging == nil {
-			staging, err = s.device.CreateBuffer(&wgpu.BufferDescriptor{
-				Size:             uint64(unsafe.Sizeof(model[0]) * uintptr(len(model))),
-				Usage:            wgpu.BufferUsage_CopySrc | wgpu.BufferUsage_MapWrite,
-				MappedAtCreation: false,
-			})
-			if err != nil {
-				return err
-			}
-		}
-		_len := uint(unsafe.Sizeof(model[0]) * uintptr(len(model)))
-		{
-			mu.Lock()
-			numPlayers = len(players)
-			// println("Num Players:", numPlayers)
-			// wg := sync.WaitGroup{}
-			staging.MapAsync(wgpu.MapMode_Write, 0, uint64(_len), func(status wgpu.BufferMapAsyncStatus) {
-				if status != wgpu.BufferMapAsyncStatus_Success {
-					return
-				}
-			})
-			s.device.Poll(true, nil)
-			byteMap := staging.GetMappedRange(0, _len)
-			modelMap := unsafe.Slice((*[16]float32)(unsafe.Pointer(&byteMap[0])), len(model))
-			i := 0
-			for _, player := range players {
-				rotation := player.Rotation.Mat4()
-				translation := glm.Translate3D(player.Position[0], player.Position[1], player.Position[2])
-				m := glm.Ident4()
-				m = m.Mul4(&translation)
-				m = m.Mul4(&rotation)
-				modelMap[i] = *(*[16]float32)(unsafe.Pointer(&m))
-				i++
-			}
-			mu.Unlock()
-			// for a := range numThreads {
-			// 	wg.Add(1)
-			// 	go func() {
-			// 		start := a * len(model) / numThreads
-			// 		end := (a + 1) * len(model) / numThreads
-			// 		for i := start; i < end; i++ {
-			// 			modelMap[i] = model[i]
-			// 		}
-			// 		// for i := range model {
-			// 		// 	rotation := glm.HomogRotate3D(float32(dt)*0.1, &axis)
-			// 		// 	m := glm.Mat4(model[i])
-			// 		// 	model[i] = m.Mul4(&rotation)
-			// 		// }
-			// 		wg.Done()
-			// 	}()
-			// }
-			// wg.Wait()
-			err = staging.Unmap()
-			if err != nil {
-				return err
-			}
-		}
-
-		err = encoder.CopyBufferToBuffer(staging, 0, s.instanceBuf, 0, uint64(_len))
-		if err != nil {
-			return err
-		}
-		// staging.Release()
-		// s.queue.WriteBuffer(s.instanceBuf, 0, modelBytes)
+	for _, r := range s.renderers {
+		r.Draw(s, encoder, renderPass)
 	}
-
-	renderPass.SetPipeline(s.pipeline)
-	renderPass.SetBindGroup(0, s.bindGroup, nil)
-	renderPass.SetIndexBuffer(s.indexBuf, wgpu.IndexFormat_Uint16, 0, wgpu.WholeSize)
-	renderPass.SetVertexBuffer(0, s.vertexBuf, 0, wgpu.WholeSize)
-	renderPass.DrawIndexed(uint32(len(indexData)), uint32(numPlayers), 0, 0, 0)
 	renderPass.End()
 
 	cmdBuffer, err := encoder.Finish(nil)
@@ -627,9 +508,13 @@ func (s *State) Render() error {
 }
 
 func (s *State) Destroy() {
-	if s.bindGroup != nil {
-		s.bindGroup.Release()
-		s.bindGroup = nil
+	// if s.bindGroup != nil {
+	// 	s.bindGroup.Release()
+	// 	s.bindGroup = nil
+	// }
+	if s.textureView != nil {
+		s.textureView.Release()
+		s.textureView = nil
 	}
 	if s.pipeline != nil {
 		s.pipeline.Release()
@@ -639,13 +524,11 @@ func (s *State) Destroy() {
 		s.uniformBuf.Release()
 		s.uniformBuf = nil
 	}
-	if s.indexBuf != nil {
-		s.indexBuf.Release()
-		s.indexBuf = nil
-	}
-	if s.vertexBuf != nil {
-		s.vertexBuf.Release()
-		s.vertexBuf = nil
+	if s.renderers != nil {
+		for _, r := range s.renderers {
+			r.Release()
+		}
+		s.renderers = nil
 	}
 	if s.swapChain != nil {
 		s.swapChain.Release()
@@ -702,6 +585,21 @@ func main() {
 	}
 	defer s.Destroy()
 
+	s.renderers[0], err = createRenderer(s, "Cube", cubeVertexData[:], cubeIndexData[:], s.textureView)
+	if err != nil {
+		panic(err)
+	}
+	s.renderers[1], err = createRenderer(s, "Plane", cubeVertexData[:], cubeIndexData[:], s.textureView)
+	if err != nil {
+		panic(err)
+	}
+	plane := s.renderers[1]
+	plane.numInstances = 1
+	m := glm.Scale3D(40, 0.5, 40)
+	t := glm.Translate3D(0, -4, 0)
+	plane.instances[0] = t.Mul4(&m)
+	s.renderers[1] = plane
+
 	mouseX, mouseY := float32(0), float32(0)
 	window.SetInputMode(glfw.CursorMode, glfw.CursorDisabled)
 	window.SetCursorPosCallback(func(w *glfw.Window, xpos, ypos float64) {
@@ -748,49 +646,34 @@ func main() {
 	// Client()
 	client := Client{}
 	client.init()
-	go client.Recv(func(s []byte) {
+	go client.Recv(func(str []byte) {
 
-		mNumPlayers := int(s[0])
+		mNumPlayers := int(str[0])
 		if mNumPlayers == 0 {
 			return
 		}
 		// mplayers := make([]*Message, mNumPlayers)
-		println("Num Players:", mNumPlayers)
+		// println("Num Players:", mNumPlayers)
 		// s = s[1:]
-		messages := unsafe.Slice((*Message)(unsafe.Pointer(&s[1])), mNumPlayers)
-		// for i := 0; i < mNumPlayers; i++ {
-		// 	message := &messages[i]
-		// 	mplayers[i] = message
-		// }
-		// message := (*Message)(unsafe.Pointer(&s[0]))
-		// id := message.Client
+		messages := unsafe.Slice((*Message)(unsafe.Pointer(&str[1])), mNumPlayers)
 		mu.Lock()
 		for _, message := range messages {
 			id := message.Client
 			players[id] = message.Data
-			fmt.Printf("Received: %d, Position: %v, Rotation: %v\n", id, players[id].Position, players[id].Rotation)
-
 		}
-		// players[id] = message.Data
-		// fmt.Printf("Received: %d, Position: %v, Rotation: %v\n", id, players[id].Position, players[id].Rotation)
+		i := 0
+		for _, player := range players {
+			rotation := player.Rotation.Mat4()
+			translation := glm.Translate3D(player.Position[0], player.Position[1], player.Position[2])
+			m := translation.Mul4(&rotation)
+			s.renderers[0].instances[i] = *(*[16]float32)(unsafe.Pointer(&m))
+			i++
+		}
+		renderer := s.renderers[0]
+		renderer.numInstances = i
+		s.renderers[0] = renderer
 		mu.Unlock()
-		// // println("Received:", s)
-		// id := 0
-		// position := glm.Vec3{}
-		// rotation := glm.Quat{}
-		// // println(s)
-		// _, err := fmt.Sscanf(s, "%d, [%v %v %v], {%v [%v %v %v]}", &id, &position[0], &position[1], &position[2], &rotation.W, &rotation.V[0], &rotation.V[1], &rotation.V[2])
-		// // println("scanned")
-		// // _, err := fmt.Sscanf(s, "%d, %d, %v", &id, &position, &rotation)
-		// if err != nil {
-		// 	fmt.Println("Error:", err)
-		// }
-		// mu.Lock()
-		// players[id] = Player{Position: position, Rotation: rotation}
-		// fmt.Printf("Received: %d, Position: %v, Rotation: %v\n", id, players[id].Position, players[id].Rotation)
-		// mu.Unlock()
 	})
-
 	last_time := time.Now()
 	for !window.ShouldClose() {
 		frames++
@@ -824,6 +707,7 @@ func main() {
 		move = move.Mul(float32(dt) * 500.0)
 		move = s.camera.Rotation.Rotate(&move)
 		s.camera.Position = s.camera.Position.Add(&move)
+		s.camera.Position[1] = float32(math.Max(float64(s.camera.Position.Y()), -3))
 		player := Player{Position: s.camera.Position, Rotation: s.camera.Rotation}
 		message := (*[unsafe.Sizeof(player)]byte)(unsafe.Pointer(&player))
 		newMessage := append([]byte{0}, message[:]...)
