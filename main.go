@@ -259,8 +259,22 @@ type Player struct {
 	Position glm.Vec3
 	Rotation glm.Quat
 }
+type Shoot struct {
+	Position  glm.Vec3
+	Direction glm.Vec3
+	Speed     float32
+	id        int
+}
+type DestroyBullet struct {
+	id int
+}
+type Bullet struct {
+	Position glm.Vec3
+	Vel      glm.Vec3
+}
 
 var players = make(map[int]Player)
+var bullets = make(map[int]Bullet)
 var mu = sync.Mutex{}
 
 func InitState(window *glfw.Window) (s *State, err error) {
@@ -490,9 +504,11 @@ func (s *State) Render() error {
 		mxTotalBytes := *(*[unsafe.Sizeof(mxTotal)]byte)(unsafe.Pointer(&mxTotal))
 		s.queue.WriteBuffer(s.uniformBuf, 0, mxTotalBytes[:])
 	}
+	mu.Lock()
 	for _, r := range s.renderers {
 		r.Draw(s, encoder, renderPass)
 	}
+	mu.Unlock()
 	renderPass.End()
 
 	cmdBuffer, err := encoder.Finish(nil)
@@ -593,6 +609,10 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
+	s.renderers[2], err = createRenderer(s, "Bullets", cubeVertexData[:], cubeIndexData[:], s.textureView)
+	if err != nil {
+		panic(err)
+	}
 	plane := s.renderers[1]
 	plane.numInstances = 1
 	m := glm.Scale3D(40, 0.5, 40)
@@ -618,6 +638,20 @@ func main() {
 
 		if action == glfw.Release {
 			delete(keys, key)
+		}
+	})
+
+	mouse := map[glfw.MouseButton]bool{}
+	mouseup := map[glfw.MouseButton]bool{}
+	mouseDown := map[glfw.MouseButton]bool{}
+	window.SetMouseButtonCallback(func(w *glfw.Window, button glfw.MouseButton, action glfw.Action, mods glfw.ModifierKey) {
+		if action == glfw.Press {
+			mouse[button] = true
+			mouseDown[button] = true
+		}
+		if action == glfw.Release {
+			delete(mouse, button)
+			mouseup[button] = true
 		}
 	})
 
@@ -652,26 +686,72 @@ func main() {
 		if mNumPlayers == 0 {
 			return
 		}
-		// mplayers := make([]*Message, mNumPlayers)
-		// println("Num Players:", mNumPlayers)
-		// s = s[1:]
-		messages := unsafe.Slice((*Message)(unsafe.Pointer(&str[1])), mNumPlayers)
+		offset := uintptr(1)
+		playerMessage := unsafe.Slice((*Message)(unsafe.Pointer(&str[offset])), mNumPlayers)
+
+		offset += unsafe.Sizeof(Message{}) * uintptr(mNumPlayers)
+		numShoot := unsafe.Slice((*int)(unsafe.Pointer(&str[offset])), 1)[0]
+		offset += unsafe.Sizeof(int(0))
+		shootMessage := unsafe.Slice((*Shoot)(unsafe.Pointer(&str[offset])), numShoot)
+
+		offset += unsafe.Sizeof(Shoot{}) * uintptr(numShoot)
+		numDestroy := unsafe.Slice((*int)(unsafe.Pointer(&str[offset])), 1)[0]
+		offset += unsafe.Sizeof(int(0))
+		destroyMessage := []DestroyBullet{}
+		if numDestroy > 0 {
+			destroyMessage = unsafe.Slice((*DestroyBullet)(unsafe.Pointer(&str[offset])), numDestroy)
+		}
+
 		mu.Lock()
-		for _, message := range messages {
+		for _, message := range playerMessage {
 			id := message.Client
 			players[id] = message.Data
 		}
+		for _, message := range shootMessage {
+			bullets[message.id] = Bullet{Position: message.Position, Vel: message.Direction.Mul(message.Speed)}
+		}
+		for _, message := range destroyMessage {
+			println("Destroying Bullet", message.id)
+			delete(bullets, message.id)
+		}
+
 		i := 0
 		for _, player := range players {
 			rotation := player.Rotation.Mat4()
 			translation := glm.Translate3D(player.Position[0], player.Position[1], player.Position[2])
 			m := translation.Mul4(&rotation)
-			s.renderers[0].instances[i] = *(*[16]float32)(unsafe.Pointer(&m))
+			s.renderers[0].instances[i] = m
 			i++
 		}
-		renderer := s.renderers[0]
-		renderer.numInstances = i
-		s.renderers[0] = renderer
+		s.renderers[0].numInstances = i
+
+		i = 0
+		gravity := glm.Vec3{0, -9.8, 0}
+		gravity = gravity.Mul(1.0 / 30.0)
+		for id, bullet := range bullets {
+			if i >= len(s.renderers[2].instances) {
+				break
+			}
+			// simulation
+			vel := bullet.Vel
+			vel = vel.Mul(1.0 / 30)
+			bullet.Position = bullet.Position.Add(&vel)
+			bullet.Vel = bullet.Vel.Add(&gravity)
+			bullets[id] = bullet
+			// matrix
+			rotation := glm.QuatLookAtV(&glm.Vec3{}, &bullet.Vel, &glm.Vec3{0, 1, 0})
+			rotMat := rotation.Mat4()
+			translation := glm.Translate3D(bullet.Position[0], bullet.Position[1], bullet.Position[2])
+			scale := glm.Scale3D(0.1, 0.1, 0.1)
+			m := rotMat.Mul4(&scale)
+			m = translation.Mul4(&m)
+			s.renderers[2].instances[i] = m
+			i++
+		}
+		s.renderers[2].numInstances = i
+		// renderer := s.renderers[0]
+		// renderer.numInstances = i
+		// s.renderers[0] = renderer
 		mu.Unlock()
 	})
 	last_time := time.Now()
@@ -712,6 +792,14 @@ func main() {
 		message := (*[unsafe.Sizeof(player)]byte)(unsafe.Pointer(&player))
 		newMessage := append([]byte{0}, message[:]...)
 		client.Send(newMessage)
+
+		if mouse[glfw.MouseButtonLeft] {
+			// println("Mouse Down")
+			message := Shoot{Position: s.camera.Position, Direction: s.camera.Rotation.Rotate(&glm.Vec3{0, 0, -1}), Speed: 50}
+			newMessage := append([]byte{1}, (*[unsafe.Sizeof(message)]byte)(unsafe.Pointer(&message))[:]...)
+
+			client.Send(newMessage)
+		}
 		// client.Send(fmt.Sprintf("%v, %v", s.camera.Position, s.camera.Rotation))
 
 		// if keys[glfw.KeyT] {
@@ -760,6 +848,9 @@ func main() {
 			}
 		}
 		avg += time.Since(frame)
+
+		mouseDown = map[glfw.MouseButton]bool{}
+		mouseup = map[glfw.MouseButton]bool{}
 
 		// if frames == 1000 {
 		// 	avg = avg / 1000.0

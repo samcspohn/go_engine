@@ -43,7 +43,11 @@ func (server *Server) Poll(dur time.Duration, f func()) {
 	}
 }
 
-var Players = make(map[int]PlayerData)
+var Players = make(map[int]Player)
+var Bullets = make(map[int]Bullet)
+var NewBullets = make([]Shoot, 0)
+var DestroyedBullets = make([]int, 0)
+var BulletId = 0
 
 func (server *Server) echo(w http.ResponseWriter, r *http.Request) {
 	connection, _ := upgrader.Upgrade(w, r, nil)
@@ -51,7 +55,7 @@ func (server *Server) echo(w http.ResponseWriter, r *http.Request) {
 	server.idGen++
 	server.clients[id] = connection // Save the connection using it as a key
 	connection.WriteMessage(websocket.TextMessage, []byte(fmt.Sprintf("%d", id)))
-	Players[id] = PlayerData{glm.Vec3{0, 0, 0}, glm.Quat{W: 0, V: glm.Vec3{0, 0, 1}}}
+	Players[id] = Player{glm.Vec3{0, 0, 0}, glm.Quat{W: 0, V: glm.Vec3{0, 0, 1}}}
 	// server.WriteMessage([]byte(fmt.Sprintf("create: %d", id)))
 
 	for {
@@ -70,16 +74,27 @@ func (server *Server) echo(w http.ResponseWriter, r *http.Request) {
 	// server.WriteMessage([]byte(fmt.Sprintf("destroy: %d", id)))
 }
 
-type PlayerData struct {
+type Player struct {
 	Position glm.Vec3
 	Rotation glm.Quat
 }
-type Message struct {
-	Client int
-	Data   PlayerData
+type Bullet struct {
+	Position glm.Vec3
+	Vel      glm.Vec3
+}
+type Shoot struct {
+	Position  glm.Vec3
+	Direction glm.Vec3
+	Speed     float32
+	Id        int
 }
 
-func (server *Server) WriteMessage(client int, message []byte) {
+type Message struct {
+	Client int
+	Data   Player
+}
+
+func (server *Server) Broadcast(message []byte) {
 	server.Lock.Lock()
 
 	// newMessage := append([]byte(fmt.Sprintf("%d, ", client)), message...)
