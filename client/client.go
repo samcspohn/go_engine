@@ -17,7 +17,7 @@ type message struct {
 
 type Client struct {
 	conn *websocket.Conn
-	id   int
+	id   int32
 }
 
 func (c *Client) Send(msg []byte) {

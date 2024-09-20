@@ -4,7 +4,9 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"reflect"
 	"runtime"
+	"shared"
 	"strings"
 	"sync"
 	"time"
@@ -255,26 +257,13 @@ func (s *State) createRenderPassDepthAttachmentView() (*wgpu.RenderPassDepthSten
 
 var model [][16]float32 = make([][16]float32, 1_000_000)
 
-type Player struct {
-	Position glm.Vec3
-	Rotation glm.Quat
-}
-type Shoot struct {
-	Position  glm.Vec3
-	Direction glm.Vec3
-	Speed     float32
-	id        int
-}
-type DestroyBullet struct {
-	id int
-}
-type Bullet struct {
-	Position glm.Vec3
-	Vel      glm.Vec3
-}
+// var players = make(map[int]shared.Player)
 
-var players = make(map[int]Player)
-var bullets = make(map[int]Bullet)
+// var bullets = make(map[int]shared.Bullet)
+var players = shared.NewStorage[shared.Player]()
+var bullets = shared.NewStorage[shared.Bullet]()
+var clientServerBulletsMap = make([]int, 10_000)
+var clientServerPlayersMap = make([]int, 10_000)
 var mu = sync.Mutex{}
 
 func InitState(window *glfw.Window) (s *State, err error) {
@@ -577,11 +566,6 @@ func (s *State) Destroy() {
 
 }
 
-type Message struct {
-	Client int
-	Data   Player
-}
-
 func main() {
 	if err := glfw.Init(); err != nil {
 		panic(err)
@@ -680,78 +664,71 @@ func main() {
 	// Client()
 	client := Client{}
 	client.init()
+	bulletHash := shared.Inst[shared.Bullet]{}.GetId()
+	playerHash := shared.Inst[shared.Player]{}.GetId()
+
+	println("clients bullet inst type: ", reflect.TypeOf(shared.Inst[shared.Bullet]{}).String())
 	go client.Recv(func(str []byte) {
-
-		mNumPlayers := int(str[0])
-		if mNumPlayers == 0 {
-			return
-		}
-		offset := uintptr(1)
-		playerMessage := unsafe.Slice((*Message)(unsafe.Pointer(&str[offset])), mNumPlayers)
-
-		offset += unsafe.Sizeof(Message{}) * uintptr(mNumPlayers)
-		numShoot := unsafe.Slice((*int)(unsafe.Pointer(&str[offset])), 1)[0]
-		offset += unsafe.Sizeof(int(0))
-		shootMessage := unsafe.Slice((*Shoot)(unsafe.Pointer(&str[offset])), numShoot)
-
-		offset += unsafe.Sizeof(Shoot{}) * uintptr(numShoot)
-		numDestroy := unsafe.Slice((*int)(unsafe.Pointer(&str[offset])), 1)[0]
-		offset += unsafe.Sizeof(int(0))
-		destroyMessage := []DestroyBullet{}
-		if numDestroy > 0 {
-			destroyMessage = unsafe.Slice((*DestroyBullet)(unsafe.Pointer(&str[offset])), numDestroy)
+		offset := uintptr(0)
+		playerMessage := []shared.Upd[shared.Player]{}
+		newPlayerMessage := []shared.Inst[shared.Player]{}
+		DeinstPlayerMessage := []shared.Deinst[shared.Player]{}
+		shootMessage := []shared.Inst[shared.Bullet]{}
+		destroyMessage := []shared.Deinst[shared.Bullet]{}
+		for offset < uintptr(len(str)) {
+			t := (*shared.Submessage)(unsafe.Pointer(&str[offset]))
+			i := uintptr(unsafe.Sizeof(shared.Submessage{}))
+			if t.NumBytes > 0 {
+				switch t.T {
+				case bulletHash:
+					{
+						switch t.Op {
+						case shared.OpInstantiate:
+							shootMessage, i = shared.DecodeSubmessage[shared.Inst[shared.Bullet]](str[offset:])
+						case shared.OpDeinstantiate:
+							destroyMessage, i = shared.DecodeSubmessage[shared.Deinst[shared.Bullet]](str[offset:])
+						}
+					}
+				case playerHash:
+					{
+						switch t.Op {
+						case shared.OpUpdate:
+							playerMessage, i = shared.DecodeSubmessage[shared.Upd[shared.Player]](str[offset:])
+						case shared.OpInstantiate:
+							newPlayerMessage, i = shared.DecodeSubmessage[shared.Inst[shared.Player]](str[offset:])
+						case shared.OpDeinstantiate:
+							DeinstPlayerMessage, i = shared.DecodeSubmessage[shared.Deinst[shared.Player]](str[offset:])
+						}
+					}
+				default:
+					panic("Unknown type")
+				}
+			}
+			offset += i
 		}
 
 		mu.Lock()
-		for _, message := range playerMessage {
-			id := message.Client
-			players[id] = message.Data
+		for _, message := range DeinstPlayerMessage {
+			id := clientServerPlayersMap[message.Id]
+			players.Remove(id)
 		}
-		for _, message := range shootMessage {
-			bullets[message.id] = Bullet{Position: message.Position, Vel: message.Direction.Mul(message.Speed)}
+		for _, message := range newPlayerMessage {
+			id := players.Emplace(message.V)
+			clientServerPlayersMap[message.Id] = id
+		}
+		for _, message := range playerMessage {
+			id := clientServerPlayersMap[message.V.Id]
+			players.Data[id] = message.V
 		}
 		for _, message := range destroyMessage {
-			println("Destroying Bullet", message.id)
-			delete(bullets, message.id)
+			id := clientServerBulletsMap[message.Id]
+			bullets.Remove(id)
+			// delete(bullets, message)
 		}
-
-		i := 0
-		for _, player := range players {
-			rotation := player.Rotation.Mat4()
-			translation := glm.Translate3D(player.Position[0], player.Position[1], player.Position[2])
-			m := translation.Mul4(&rotation)
-			s.renderers[0].instances[i] = m
-			i++
+		for _, message := range shootMessage {
+			id := bullets.Emplace(message.V)
+			clientServerBulletsMap[message.Id] = id
 		}
-		s.renderers[0].numInstances = i
-
-		i = 0
-		gravity := glm.Vec3{0, -9.8, 0}
-		gravity = gravity.Mul(1.0 / 30.0)
-		for id, bullet := range bullets {
-			if i >= len(s.renderers[2].instances) {
-				break
-			}
-			// simulation
-			vel := bullet.Vel
-			vel = vel.Mul(1.0 / 30)
-			bullet.Position = bullet.Position.Add(&vel)
-			bullet.Vel = bullet.Vel.Add(&gravity)
-			bullets[id] = bullet
-			// matrix
-			rotation := glm.QuatLookAtV(&glm.Vec3{}, &bullet.Vel, &glm.Vec3{0, 1, 0})
-			rotMat := rotation.Mat4()
-			translation := glm.Translate3D(bullet.Position[0], bullet.Position[1], bullet.Position[2])
-			scale := glm.Scale3D(0.1, 0.1, 0.1)
-			m := rotMat.Mul4(&scale)
-			m = translation.Mul4(&m)
-			s.renderers[2].instances[i] = m
-			i++
-		}
-		s.renderers[2].numInstances = i
-		// renderer := s.renderers[0]
-		// renderer.numInstances = i
-		// s.renderers[0] = renderer
 		mu.Unlock()
 	})
 	last_time := time.Now()
@@ -788,14 +765,16 @@ func main() {
 		move = s.camera.Rotation.Rotate(&move)
 		s.camera.Position = s.camera.Position.Add(&move)
 		s.camera.Position[1] = float32(math.Max(float64(s.camera.Position.Y()), -3))
-		player := Player{Position: s.camera.Position, Rotation: s.camera.Rotation}
+		player := shared.Player{Position: s.camera.Position, Rotation: s.camera.Rotation}
 		message := (*[unsafe.Sizeof(player)]byte)(unsafe.Pointer(&player))
 		newMessage := append([]byte{0}, message[:]...)
 		client.Send(newMessage)
 
 		if mouse[glfw.MouseButtonLeft] {
 			// println("Mouse Down")
-			message := Shoot{Position: s.camera.Position, Direction: s.camera.Rotation.Rotate(&glm.Vec3{0, 0, -1}), Speed: 50}
+			// message := shared.Shoot{Position: s.camera.Position, Direction: s.camera.Rotation.Rotate(&glm.Vec3{0, 0, -1}), Speed: 50}
+			dir := s.camera.Rotation.Rotate(&glm.Vec3{0, 0, -1})
+			message := shared.Bullet{Position: s.camera.Position, Vel: dir.Mul(50)}
 			newMessage := append([]byte{1}, (*[unsafe.Sizeof(message)]byte)(unsafe.Pointer(&message))[:]...)
 
 			client.Send(newMessage)
@@ -807,27 +786,67 @@ func main() {
 		// }
 
 		// model := make([][16]float32, 1)
-		axis := glm.Vec3{0, 1, 0}
-		axis = glm.NormalizeVec3(axis)
-		wg := sync.WaitGroup{}
+		// axis := glm.Vec3{0, 1, 0}
+		// axis = glm.NormalizeVec3(axis)
+		// wg := sync.WaitGroup{}
 
-		for a := range numThreads {
-			wg.Add(1)
-			go func() {
-				start := a * len(model) / numThreads
-				end := (a + 1) * len(model) / numThreads
-				for i := start; i < end; i++ {
-					rotation := glm.HomogRotate3D(float32(dt), &axis)
-					translation := glm.Translate3D(0, 0, float32(dt)*5.0)
-					m := glm.Mat4(model[i])
-					m = m.Mul4(&rotation)
-					model[i] = m.Mul4(&translation)
-				}
-				wg.Done()
-			}()
+		// for a := range numThreads {
+		// 	wg.Add(1)
+		// 	go func() {
+		// 		start := a * len(model) / numThreads
+		// 		end := (a + 1) * len(model) / numThreads
+		// 		for i := start; i < end; i++ {
+		// 			rotation := glm.HomogRotate3D(float32(dt), &axis)
+		// 			translation := glm.Translate3D(0, 0, float32(dt)*5.0)
+		// 			m := glm.Mat4(model[i])
+		// 			m = m.Mul4(&rotation)
+		// 			model[i] = m.Mul4(&translation)
+		// 		}
+		// 		wg.Done()
+		// 	}()
+		// }
+		// wg.Wait()
+		mu.Lock()
+		i := 0
+		for idx, player := range players.Data {
+			if !players.Valid[idx] {
+				continue
+			}
+			rotation := player.Rotation.Mat4()
+			translation := glm.Translate3D(player.Position[0], player.Position[1], player.Position[2])
+			m := translation.Mul4(&rotation)
+			s.renderers[0].instances[i] = m
+			i++
 		}
-		wg.Wait()
-
+		s.renderers[0].numInstances = i
+		i = 0
+		gravity := glm.Vec3{0, -9.8, 0}
+		gravity = gravity.Mul(float32(dt))
+		for id, bullet := range bullets.Data {
+			if i >= len(s.renderers[2].instances) {
+				break
+			}
+			if !bullets.Valid[id] {
+				continue
+			}
+			// simulation
+			vel := bullet.Vel
+			vel = vel.Mul(float32(dt))
+			bullet.Position = bullet.Position.Add(&vel)
+			bullet.Vel = bullet.Vel.Add(&gravity)
+			bullets.Data[id] = bullet
+			// matrix
+			rotation := glm.QuatLookAtV(&glm.Vec3{}, &bullet.Vel, &glm.Vec3{0, 1, 0})
+			rotMat := rotation.Mat4()
+			translation := glm.Translate3D(bullet.Position[0], bullet.Position[1], bullet.Position[2])
+			scale := glm.Scale3D(0.1, 0.1, 0.1)
+			m := rotMat.Mul4(&scale)
+			m = translation.Mul4(&m)
+			s.renderers[2].instances[i] = m
+			i++
+		}
+		s.renderers[2].numInstances = i
+		mu.Unlock()
 		// for i := range model {
 		// 	rotation := glm.HomogRotate3D(float32(dt)*0.1, &axis)
 		// 	m := glm.Mat4(model[i])

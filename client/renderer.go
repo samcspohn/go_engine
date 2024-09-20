@@ -55,7 +55,7 @@ func createRenderer(s *State, name string, vertexData []Vertex, indexData []uint
 	}
 	r.indexBufLen = len(indexData)
 
-	r.instances = make([][16]float32, 1_000)
+	r.instances = make([][16]float32, 10_000)
 
 	{
 		r.instanceBuf, err = s.device.CreateBuffer(&wgpu.BufferDescriptor{

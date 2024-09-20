@@ -3,6 +3,7 @@ package ws
 import (
 	"fmt"
 	"net/http"
+	"shared"
 	"sync"
 	"time"
 
@@ -43,11 +44,12 @@ func (server *Server) Poll(dur time.Duration, f func()) {
 	}
 }
 
-var Players = make(map[int]Player)
-var Bullets = make(map[int]Bullet)
-var NewBullets = make([]Shoot, 0)
-var DestroyedBullets = make([]int, 0)
-var BulletId = 0
+var Players = shared.NewStorage[shared.Player]()
+var Bullets = shared.NewStorage[shared.Bullet]()
+var NewBullets = make([]shared.Inst[shared.Bullet], 0)
+var DestroyedBullets = make([]shared.Deinst[shared.Bullet], 0)
+var NewPlayers = make([]shared.Inst[shared.Player], 0)
+var DestroyedPlayers = make([]int, 0)
 
 func (server *Server) echo(w http.ResponseWriter, r *http.Request) {
 	connection, _ := upgrader.Upgrade(w, r, nil)
@@ -55,8 +57,26 @@ func (server *Server) echo(w http.ResponseWriter, r *http.Request) {
 	server.idGen++
 	server.clients[id] = connection // Save the connection using it as a key
 	connection.WriteMessage(websocket.TextMessage, []byte(fmt.Sprintf("%d", id)))
-	Players[id] = Player{glm.Vec3{0, 0, 0}, glm.Quat{W: 0, V: glm.Vec3{0, 0, 1}}}
-	// server.WriteMessage([]byte(fmt.Sprintf("create: %d", id)))
+	player := shared.Player{Position: glm.Vec3{0, 0, 0}, Rotation: glm.Quat{W: 0, V: glm.Vec3{0, 0, 1}}, Id: id}
+	_id := Players.Emplace(player)
+
+	instBullets := make([]shared.Inst[shared.Bullet], 0)
+	for i, bullet := range Bullets.Data {
+		if !Bullets.Valid[i] {
+			continue
+		}
+		instBullets = append(instBullets, shared.Inst[shared.Bullet]{Id: i, V: bullet})
+	}
+	instPlayers := make([]shared.Inst[shared.Player], 0)
+	for i, player := range Players.Data {
+		if !Players.Valid[i] {
+			continue
+		}
+		instPlayers = append(instPlayers, shared.Inst[shared.Player]{Id: i, V: player})
+	}
+	bytes := shared.EncodeSubmessage(instPlayers)
+	bytes = append(bytes, shared.EncodeSubmessage(instBullets)...)
+	connection.WriteMessage(websocket.BinaryMessage, bytes)
 
 	for {
 		mt, message, err := connection.ReadMessage()
@@ -67,32 +87,21 @@ func (server *Server) echo(w http.ResponseWriter, r *http.Request) {
 
 		go server.handleMessage(server, id, message)
 	}
-	delete(Players, id)
+	// delete(Players, id)
+	Players.Remove(_id)
+	bytes = shared.EncodeSubmessage([]shared.Deinst[shared.Player]{{Id: _id}})
+	server.Broadcast(bytes)
+	// DestroyedPlayers = append(DestroyedPlayers, _id)
 	delete(server.clients, id) // Removing the connection
 
 	connection.Close()
 	// server.WriteMessage([]byte(fmt.Sprintf("destroy: %d", id)))
 }
 
-type Player struct {
-	Position glm.Vec3
-	Rotation glm.Quat
-}
-type Bullet struct {
-	Position glm.Vec3
-	Vel      glm.Vec3
-}
-type Shoot struct {
-	Position  glm.Vec3
-	Direction glm.Vec3
-	Speed     float32
-	Id        int
-}
-
-type Message struct {
-	Client int
-	Data   Player
-}
+// type Message struct {
+// 	Client int
+// 	Data   shared.Player
+// }
 
 func (server *Server) Broadcast(message []byte) {
 	server.Lock.Lock()
