@@ -44,41 +44,29 @@ func (server *Server) Poll(dur time.Duration, f func()) {
 	}
 }
 
-var Players = shared.NewStorage[shared.Player]()
-var Bullets = shared.NewStorage[shared.Bullet]()
-var NewBullets = make([]shared.Inst[shared.Bullet], 0)
-var DestroyedBullets = make([]shared.Deinst[shared.Bullet], 0)
-var NewPlayers = make([]shared.Inst[shared.Player], 0)
-var DestroyedPlayers = make([]int, 0)
+var ECS = shared.NewECS()
 
 func (server *Server) echo(w http.ResponseWriter, r *http.Request) {
 	connection, _ := upgrader.Upgrade(w, r, nil)
 	// id := server.idGen
 	// server.idGen++
+	server.Lock.Lock()
+
+	players := shared.GetStorage[shared.Player](ECS)
+	bullets := shared.GetStorage[shared.Bullet](ECS)
+	msg := []byte{}
+	msg = append(msg, players.EncodeInst()...) // Send all players to the new client except the new player
+
 	player := shared.Player{Position: glm.Vec3{0, 0, 0}, Rotation: glm.Quat{W: 0, V: glm.Vec3{0, 0, 1}}}
-	id := Players.Emplace(player)
+	id := int(players.Emplace(player))
 	server.clients[id] = connection // Save the connection using it as a key
 	connection.WriteMessage(websocket.TextMessage, []byte(fmt.Sprintf("%d", id)))
 
-	Players.Data[id].Id = id
+	players.Data[id].Id = id
 
-	instBullets := make([]shared.Inst[shared.Bullet], 0)
-	for i, bullet := range Bullets.Data {
-		if !Bullets.Valid[i] {
-			continue
-		}
-		instBullets = append(instBullets, shared.Inst[shared.Bullet]{Id: i, V: bullet})
-	}
-	instPlayers := make([]shared.Inst[shared.Player], 0)
-	for i, player := range Players.Data {
-		if !Players.Valid[i] {
-			continue
-		}
-		instPlayers = append(instPlayers, shared.Inst[shared.Player]{Id: i, V: player})
-	}
-	bytes := shared.EncodeSubmessage(instPlayers)
-	bytes = append(bytes, shared.EncodeSubmessage(instBullets)...)
-	connection.WriteMessage(websocket.BinaryMessage, bytes)
+	msg = append(msg, bullets.EncodeInst()...)
+	server.Lock.Unlock()
+	connection.WriteMessage(websocket.BinaryMessage, msg)
 
 	for {
 		mt, message, err := connection.ReadMessage()
@@ -89,28 +77,15 @@ func (server *Server) echo(w http.ResponseWriter, r *http.Request) {
 
 		go server.handleMessage(server, id, message)
 	}
-	// delete(Players, id)
-	Players.Remove(id)
-	bytes = shared.EncodeSubmessage([]shared.Deinst[shared.Player]{{Id: id}})
-	server.Broadcast(bytes)
-	// DestroyedPlayers = append(DestroyedPlayers, _id)
+	players.Remove(uint32(id)) // Removing the player from the server
 	delete(server.clients, id) // Removing the connection
 
 	connection.Close()
-	// server.WriteMessage([]byte(fmt.Sprintf("destroy: %d", id)))
 }
-
-// type Message struct {
-// 	Client int
-// 	Data   shared.Player
-// }
 
 func (server *Server) Broadcast(message []byte) {
 	server.Lock.Lock()
-
-	// newMessage := append([]byte(fmt.Sprintf("%d, ", client)), message...)
 	for _, conn := range server.clients {
-		// println(string(newMessage))
 		err := conn.WriteMessage(websocket.BinaryMessage, message)
 		if err != nil {
 			println("Error writing message")

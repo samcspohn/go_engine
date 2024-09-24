@@ -34,7 +34,7 @@ type Op interface {
 
 // instantiate
 type Inst[T any] struct {
-	Id int
+	Id uint32
 	V  T
 }
 
@@ -48,7 +48,7 @@ func (i Inst[T]) GetOp() int {
 
 // deinstantiate
 type Deinst[T any] struct {
-	Id int
+	Id uint32
 }
 
 func (i Deinst[T]) GetId() uint32 {
@@ -61,7 +61,7 @@ func (i Deinst[T]) GetOp() int {
 
 // update
 type Upd[T any] struct {
-	Id int
+	Id uint32
 	V  T
 }
 
@@ -109,7 +109,7 @@ func EncodeSubmessage[T Op](v []T) []byte { // todo: use gob on v part
 	s := Submessage{a.GetId(), a.GetOp(), uintptr(len(vbytes))}
 	return append(unsafe.Slice((*byte)(unsafe.Pointer(&s)), int(unsafe.Sizeof(s))), vbytes...)
 }
-func DecodeSubmessage[T any](b []byte) ([]T, uintptr) {
+func DecodeSubmessage[T Op](b []byte) ([]T, uintptr) {
 	s := *(*Submessage)(unsafe.Pointer(&b[0]))
 	if s.NumBytes == 0 {
 		return []T{}, unsafe.Sizeof(s)

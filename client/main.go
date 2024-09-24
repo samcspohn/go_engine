@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"math"
 	"os"
-	"reflect"
 	"runtime"
 	"shared"
 	"strings"
@@ -255,15 +254,7 @@ func (s *State) createRenderPassDepthAttachmentView() (*wgpu.RenderPassDepthSten
 	}, nil
 }
 
-var model [][16]float32 = make([][16]float32, 1_000_000)
-
-// var players = make(map[int]shared.Player)
-
-// var bullets = make(map[int]shared.Bullet)
-var players = shared.NewStorage[shared.Player]()
-var bullets = shared.NewStorage[shared.Bullet]()
-var clientServerBulletsMap = make([]int, 10_000)
-var clientServerPlayersMap = make([]int, 10_000)
+var ECS = shared.NewECS()
 var mu = sync.Mutex{}
 
 func InitState(window *glfw.Window) (s *State, err error) {
@@ -660,74 +651,30 @@ func main() {
 			}
 		}
 	}()
-
 	// Client()
 	client := Client{}
 	client.init()
-	bulletHash := shared.Inst[shared.Bullet]{}.GetId()
-	playerHash := shared.Inst[shared.Player]{}.GetId()
 
-	println("clients bullet inst type: ", reflect.TypeOf(shared.Inst[shared.Bullet]{}).String())
+	shared.Register(ECS, shared.Player{}, false)
+	shared.Register(ECS, shared.Bullet{}, false)
+
 	go client.Recv(func(str []byte) {
 		offset := uintptr(0)
-		playerMessage := []shared.Upd[shared.Player]{}
-		newPlayerMessage := []shared.Inst[shared.Player]{}
-		DeinstPlayerMessage := []shared.Deinst[shared.Player]{}
-		shootMessage := []shared.Inst[shared.Bullet]{}
-		destroyMessage := []shared.Deinst[shared.Bullet]{}
+		mu.Lock()
 		for offset < uintptr(len(str)) {
 			t := (*shared.Submessage)(unsafe.Pointer(&str[offset]))
 			i := uintptr(unsafe.Sizeof(shared.Submessage{}))
 			if t.NumBytes > 0 {
-				switch t.T {
-				case bulletHash:
-					{
-						switch t.Op {
-						case shared.OpInstantiate:
-							shootMessage, i = shared.DecodeSubmessage[shared.Inst[shared.Bullet]](str[offset:])
-						case shared.OpDeinstantiate:
-							destroyMessage, i = shared.DecodeSubmessage[shared.Deinst[shared.Bullet]](str[offset:])
-						}
-					}
-				case playerHash:
-					{
-						switch t.Op {
-						case shared.OpUpdate:
-							playerMessage, i = shared.DecodeSubmessage[shared.Upd[shared.Player]](str[offset:])
-						case shared.OpInstantiate:
-							newPlayerMessage, i = shared.DecodeSubmessage[shared.Inst[shared.Player]](str[offset:])
-						case shared.OpDeinstantiate:
-							DeinstPlayerMessage, i = shared.DecodeSubmessage[shared.Deinst[shared.Player]](str[offset:])
-						}
-					}
-				default:
-					panic("Unknown type")
+				switch t.Op {
+				case shared.OpUpdate:
+					i = (*ECS.Entities[t.T]).SyncUpd(t, str[offset:])
+				case shared.OpInstantiate:
+					i = (*ECS.Entities[t.T]).SyncInst(t, str[offset:])
+				case shared.OpDeinstantiate:
+					i = (*ECS.Entities[t.T]).SyncDeinst(t, str[offset:])
 				}
 			}
 			offset += i
-		}
-
-		mu.Lock()
-		for _, message := range DeinstPlayerMessage {
-			id := clientServerPlayersMap[message.Id]
-			players.Remove(id)
-		}
-		for _, message := range newPlayerMessage {
-			id := players.Emplace(message.V)
-			clientServerPlayersMap[message.Id] = id
-		}
-		for _, message := range playerMessage {
-			id := clientServerPlayersMap[message.V.Id]
-			players.Data[id] = message.V
-		}
-		for _, message := range destroyMessage {
-			id := clientServerBulletsMap[message.Id]
-			bullets.Remove(id)
-			// delete(bullets, message)
-		}
-		for _, message := range shootMessage {
-			id := bullets.Emplace(message.V)
-			clientServerBulletsMap[message.Id] = id
 		}
 		mu.Unlock()
 	})
@@ -744,33 +691,31 @@ func main() {
 
 		move := glm.Vec3{0, 0, 0}
 		if keys[glfw.KeyW] {
-			move = move.Add(&glm.Vec3{0, 0, -0.1})
+			move = move.Add(&glm.Vec3{0, 0, -1})
 		}
 		if keys[glfw.KeyS] {
-			move = move.Add(&glm.Vec3{0, 0, 0.1})
+			move = move.Add(&glm.Vec3{0, 0, 1})
 		}
 		if keys[glfw.KeyA] {
-			move = move.Add(&glm.Vec3{-0.1, 0, 0})
+			move = move.Add(&glm.Vec3{-1, 0, 0})
 		}
 		if keys[glfw.KeyD] {
-			move = move.Add(&glm.Vec3{0.1, 0, 0})
+			move = move.Add(&glm.Vec3{1, 0, 0})
 		}
 		if keys[glfw.KeyQ] {
-			move = move.Add(&glm.Vec3{0, -0.1, 0})
+			move = move.Add(&glm.Vec3{0, -1, 0})
 		}
 		if keys[glfw.KeyE] {
-			move = move.Add(&glm.Vec3{0, 0.1, 0})
+			move = move.Add(&glm.Vec3{0, 1, 0})
 		}
-		move = move.Mul(float32(dt) * 500.0)
+		move = move.Mul(float32(dt) * 50.0)
 		move = s.camera.Rotation.Rotate(&move)
 		s.camera.Position = s.camera.Position.Add(&move)
 		s.camera.Position[1] = float32(math.Max(float64(s.camera.Position.Y()), -3))
-		if len(players.Data) > 0 {
-			player := shared.Player{Position: s.camera.Position, Rotation: s.camera.Rotation, Id: int(client.id)}
-			message := (*[unsafe.Sizeof(player)]byte)(unsafe.Pointer(&player))
-			newMessage := append([]byte{0}, message[:]...)
-			client.Send(newMessage)
-		}
+		player := shared.Player{Position: s.camera.Position, Rotation: s.camera.Rotation, Id: int(client.id)}
+		message := (*[unsafe.Sizeof(player)]byte)(unsafe.Pointer(&player))
+		newMessage := append([]byte{0}, message[:]...)
+		client.Send(newMessage)
 
 		if mouse[glfw.MouseButtonLeft] {
 			// println("Mouse Down")
@@ -784,6 +729,7 @@ func main() {
 
 		mu.Lock()
 		i := 0
+		players := shared.GetStorage[shared.Player](ECS)
 		for idx, player := range players.Data {
 			if !players.Valid[idx] {
 				continue
@@ -798,6 +744,7 @@ func main() {
 		i = 0
 		gravity := glm.Vec3{0, -9.8, 0}
 		gravity = gravity.Mul(float32(dt))
+		bullets := shared.GetStorage[shared.Bullet](ECS)
 		for id, bullet := range bullets.Data {
 			if i >= len(s.renderers[2].instances) {
 				break
@@ -846,13 +793,5 @@ func main() {
 
 		mouseDown = map[glfw.MouseButton]bool{}
 		mouseup = map[glfw.MouseButton]bool{}
-
-		// if frames == 1000 {
-		// 	avg = avg / 1000.0
-		// 	fps := float32(time.Second / avg)
-		// 	fmt.Println("FPS:", fps)
-		// 	frames = 0
-		// 	avg = 0
-		// }
 	}
 }
