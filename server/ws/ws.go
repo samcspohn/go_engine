@@ -20,15 +20,15 @@ var upgrader = websocket.Upgrader{
 type Server struct {
 	clients       map[int]*websocket.Conn
 	handleMessage func(server *Server, id int, message []byte) // New message handler
-	idGen         int
-	Lock          sync.Mutex
+	// idGen         int
+	Lock sync.Mutex
 }
 
 func StartServer(handleMessage func(server *Server, id int, message []byte)) *Server {
 	server := Server{
 		make(map[int]*websocket.Conn),
 		handleMessage,
-		0,
+		// 0,
 		sync.Mutex{},
 	}
 
@@ -53,12 +53,14 @@ var DestroyedPlayers = make([]int, 0)
 
 func (server *Server) echo(w http.ResponseWriter, r *http.Request) {
 	connection, _ := upgrader.Upgrade(w, r, nil)
-	id := server.idGen
-	server.idGen++
+	// id := server.idGen
+	// server.idGen++
+	player := shared.Player{Position: glm.Vec3{0, 0, 0}, Rotation: glm.Quat{W: 0, V: glm.Vec3{0, 0, 1}}}
+	id := Players.Emplace(player)
 	server.clients[id] = connection // Save the connection using it as a key
 	connection.WriteMessage(websocket.TextMessage, []byte(fmt.Sprintf("%d", id)))
-	player := shared.Player{Position: glm.Vec3{0, 0, 0}, Rotation: glm.Quat{W: 0, V: glm.Vec3{0, 0, 1}}, Id: id}
-	_id := Players.Emplace(player)
+
+	Players.Data[id].Id = id
 
 	instBullets := make([]shared.Inst[shared.Bullet], 0)
 	for i, bullet := range Bullets.Data {
@@ -88,8 +90,8 @@ func (server *Server) echo(w http.ResponseWriter, r *http.Request) {
 		go server.handleMessage(server, id, message)
 	}
 	// delete(Players, id)
-	Players.Remove(_id)
-	bytes = shared.EncodeSubmessage([]shared.Deinst[shared.Player]{{Id: _id}})
+	Players.Remove(id)
+	bytes = shared.EncodeSubmessage([]shared.Deinst[shared.Player]{{Id: id}})
 	server.Broadcast(bytes)
 	// DestroyedPlayers = append(DestroyedPlayers, _id)
 	delete(server.clients, id) // Removing the connection

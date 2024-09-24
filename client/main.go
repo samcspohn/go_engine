@@ -765,10 +765,12 @@ func main() {
 		move = s.camera.Rotation.Rotate(&move)
 		s.camera.Position = s.camera.Position.Add(&move)
 		s.camera.Position[1] = float32(math.Max(float64(s.camera.Position.Y()), -3))
-		player := shared.Player{Position: s.camera.Position, Rotation: s.camera.Rotation}
-		message := (*[unsafe.Sizeof(player)]byte)(unsafe.Pointer(&player))
-		newMessage := append([]byte{0}, message[:]...)
-		client.Send(newMessage)
+		if len(players.Data) > 0 {
+			player := shared.Player{Position: s.camera.Position, Rotation: s.camera.Rotation, Id: int(client.id)}
+			message := (*[unsafe.Sizeof(player)]byte)(unsafe.Pointer(&player))
+			newMessage := append([]byte{0}, message[:]...)
+			client.Send(newMessage)
+		}
 
 		if mouse[glfw.MouseButtonLeft] {
 			// println("Mouse Down")
@@ -779,33 +781,7 @@ func main() {
 
 			client.Send(newMessage)
 		}
-		// client.Send(fmt.Sprintf("%v, %v", s.camera.Position, s.camera.Rotation))
 
-		// if keys[glfw.KeyT] {
-		// 	client.Send("Hello")
-		// }
-
-		// model := make([][16]float32, 1)
-		// axis := glm.Vec3{0, 1, 0}
-		// axis = glm.NormalizeVec3(axis)
-		// wg := sync.WaitGroup{}
-
-		// for a := range numThreads {
-		// 	wg.Add(1)
-		// 	go func() {
-		// 		start := a * len(model) / numThreads
-		// 		end := (a + 1) * len(model) / numThreads
-		// 		for i := start; i < end; i++ {
-		// 			rotation := glm.HomogRotate3D(float32(dt), &axis)
-		// 			translation := glm.Translate3D(0, 0, float32(dt)*5.0)
-		// 			m := glm.Mat4(model[i])
-		// 			m = m.Mul4(&rotation)
-		// 			model[i] = m.Mul4(&translation)
-		// 		}
-		// 		wg.Done()
-		// 	}()
-		// }
-		// wg.Wait()
 		mu.Lock()
 		i := 0
 		for idx, player := range players.Data {
