@@ -46,6 +46,14 @@ func (i Inst[T]) GetOp() int {
 	return OpInstantiate
 }
 
+type InstReq[T any] struct {
+	V T
+}
+type UpdReq[T any] struct {
+	Id uint32
+	V  T
+}
+
 // deinstantiate
 type Deinst[T any] struct {
 	Id uint32

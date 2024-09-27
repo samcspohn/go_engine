@@ -79,8 +79,10 @@ func (s *Storage[T]) Len() int {
 type StorageBase interface {
 	// Update()
 	SyncInst(s *Submessage, b []byte) uintptr
+	SyncInstServer(s *Submessage, b []byte) uintptr
 	SyncDeinst(s *Submessage, b []byte) uintptr
 	SyncUpd(s *Submessage, b []byte) uintptr
+	SyncUpdServer(s *Submessage, b []byte) uintptr
 	GetId() uint32
 	Encode() []byte
 	EncodeUpdates() []byte
@@ -93,24 +95,38 @@ func (s *Storage[T]) GetId() uint32 {
 }
 func (s *Storage[T]) SyncInst(submessage *Submessage, b []byte) uintptr {
 	a, offset := DecodeSubmessage[Inst[T]](b)
-	for _, v := range a {
-		id := s.Emplace(v.V)
-		*s.mapping.get(v.Id) = id
+	for _, i := range a {
+		id := s.Emplace(i.V)
+		*s.mapping.get(i.Id) = id
+	}
+	return offset
+}
+func (s *Storage[T]) SyncInstServer(submessage *Submessage, b []byte) uintptr {
+	a, offset := DecodeSubmessage[Inst[T]](b)
+	for _, i := range a {
+		s.Emplace(i.V)
 	}
 	return offset
 }
 func (s *Storage[T]) SyncDeinst(submessage *Submessage, b []byte) uintptr {
 	a, offset := DecodeSubmessage[Deinst[T]](b)
-	for _, v := range a {
-		id := *s.mapping.get(v.Id)
+	for _, d := range a {
+		id := *s.mapping.get(d.Id)
 		s.Remove(id)
 	}
 	return offset
 }
 func (s *Storage[T]) SyncUpd(submessage *Submessage, b []byte) uintptr {
 	a, offset := DecodeSubmessage[Upd[T]](b)
-	for _, v := range a {
-		s.Data[*s.mapping.get(v.Id)] = v.V
+	for _, u := range a {
+		s.Data[*s.mapping.get(u.Id)] = u.V
+	}
+	return offset
+}
+func (s *Storage[T]) SyncUpdServer(submessage *Submessage, b []byte) uintptr {
+	a, offset := DecodeSubmessage[Upd[T]](b)
+	for _, u := range a {
+		s.Data[u.Id] = u.V
 	}
 	return offset
 }

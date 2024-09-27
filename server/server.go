@@ -1,6 +1,7 @@
 package main
 
 import (
+	"shared"
 	. "shared"
 	"time"
 	"unsafe"
@@ -38,7 +39,7 @@ func main() {
 			step := bullet.Vel.Mul(1.0 / 30.0)
 			bullet.Position = bullet.Position.Add(&step)
 			bullet.Vel = bullet.Vel.Add(&gravity)
-			if bullet.Position[1] < 0 {
+			if bullet.Position[1] < -3 {
 				bullets.Remove(uint32(id))
 			} else {
 				bullets.Data[id] = bullet
@@ -55,25 +56,45 @@ func main() {
 }
 
 func messageHandler(server *ws.Server, id int, message []byte) {
-	// fmt.Println(string(message))
-	messageType := message[0]
-	switch messageType {
-	case 0:
-		{
-			d := (*Player)(unsafe.Pointer(&message[1]))
-			server.Lock.Lock()
-			players := GetStorage[Player](ws.ECS)
-			players.Data[d.Id] = *d
-			server.Lock.Unlock()
+
+	offset := uintptr(0)
+	server.Lock.Lock()
+	for offset < uintptr(len(message)) {
+		t := (*shared.Submessage)(unsafe.Pointer(&message[offset]))
+		i := uintptr(unsafe.Sizeof(shared.Submessage{}))
+		if t.NumBytes > 0 {
+			switch t.Op {
+			case shared.OpUpdate:
+				i = (*ws.ECS.Entities[t.T]).SyncUpdServer(t, message[offset:])
+			case shared.OpInstantiate:
+				i = (*ws.ECS.Entities[t.T]).SyncInstServer(t, message[offset:])
+				// case shared.OpDeinstantiate:
+				// 	i = (*ws.ECS.Entities[t.T]).SyncDeinst(t, message[offset:])
+			}
 		}
-	case 1:
-		{
-			bullet := (*Bullet)(unsafe.Pointer(&message[1]))
-			server.Lock.Lock()
-			bullets := GetStorage[Bullet](ws.ECS)
-			bullets.Emplace(*bullet)
-			// ws.NewBullets = append(ws.NewBullets, Inst[Bullet]{Id: bulletId, V: *bullet})
-			server.Lock.Unlock()
-		}
+		offset += i
 	}
+	server.Lock.Unlock()
+
+	// fmt.Println(string(message))
+	// messageType := message[0]
+	// switch messageType {
+	// case 0:
+	// 	{
+	// 		d := (*Player)(unsafe.Pointer(&message[1]))
+	// 		server.Lock.Lock()
+	// 		players := GetStorage[Player](ws.ECS)
+	// 		players.Data[d.Id] = *d
+	// 		server.Lock.Unlock()
+	// 	}
+	// case 1:
+	// 	{
+	// 		bullet := (*Bullet)(unsafe.Pointer(&message[1]))
+	// 		server.Lock.Lock()
+	// 		bullets := GetStorage[Bullet](ws.ECS)
+	// 		bullets.Emplace(*bullet)
+	// 		// ws.NewBullets = append(ws.NewBullets, Inst[Bullet]{Id: bulletId, V: *bullet})
+	// 		server.Lock.Unlock()
+	// 	}
+	// }
 }

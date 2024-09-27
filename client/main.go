@@ -712,20 +712,26 @@ func main() {
 		move = s.camera.Rotation.Rotate(&move)
 		s.camera.Position = s.camera.Position.Add(&move)
 		s.camera.Position[1] = float32(math.Max(float64(s.camera.Position.Y()), -3))
-		player := shared.Player{Position: s.camera.Position, Rotation: s.camera.Rotation, Id: int(client.id)}
-		message := (*[unsafe.Sizeof(player)]byte)(unsafe.Pointer(&player))
-		newMessage := append([]byte{0}, message[:]...)
-		client.Send(newMessage)
+		// player := shared.Player{Position: s.camera.Position, Rotation: s.camera.Rotation, Id: int(client.id)}
+		// message := (*[unsafe.Sizeof(player)]byte)(unsafe.Pointer(&player))
+		// newMessage := append([]byte{0}, message[:]...)
+		// client.Send(newMessage)
+		playerMsg := shared.Player{Position: s.camera.Position, Rotation: s.camera.Rotation, Id: int(client.id)}
+		playerUpd := []shared.Upd[shared.Player]{{Id: uint32(client.id), V: playerMsg}}
+		msg := shared.EncodeSubmessage(playerUpd)
 
 		if mouse[glfw.MouseButtonLeft] {
 			// println("Mouse Down")
 			// message := shared.Shoot{Position: s.camera.Position, Direction: s.camera.Rotation.Rotate(&glm.Vec3{0, 0, -1}), Speed: 50}
 			dir := s.camera.Rotation.Rotate(&glm.Vec3{0, 0, -1})
 			message := shared.Bullet{Position: s.camera.Position, Vel: dir.Mul(50)}
-			newMessage := append([]byte{1}, (*[unsafe.Sizeof(message)]byte)(unsafe.Pointer(&message))[:]...)
+			bulletUpd := []shared.Inst[shared.Bullet]{{Id: 0, V: message}}
+			msg = append(msg, shared.EncodeSubmessage(bulletUpd)...)
+			// newMessage := append([]byte{1}, (*[unsafe.Sizeof(message)]byte)(unsafe.Pointer(&message))[:]...)
 
-			client.Send(newMessage)
+			// client.Send(newMessage)
 		}
+		client.Send(msg)
 
 		mu.Lock()
 		i := 0
